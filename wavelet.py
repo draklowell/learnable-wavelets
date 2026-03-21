@@ -20,8 +20,8 @@ def compute_filters(angles, dtype=None, device=None):
         cos = torch.cos(theta)
         sin = torch.sin(theta)
 
-        H_even_new = H_even * cos + H_odd * sin
-        H_odd_new = -H_even * sin + H_odd * cos
+        H_even_new = H_even * cos - H_odd * sin
+        H_odd_new = H_even * sin + H_odd * cos
         H_even, H_odd = H_even_new, H_odd_new
 
     low = torch.empty(angles.shape[0] * 2, dtype=dtype, device=device)
@@ -153,6 +153,7 @@ class WaveletTransformSynthesisMultiLevel1D(nn.Module):
 
         return approx
 
+
 class WaveletTransformParameters2D(nn.Module):
     def forward(self, filters):
         """
@@ -163,7 +164,7 @@ class WaveletTransformParameters2D(nn.Module):
         """
         L = filters.shape[-1]
         # [2, 1, 1, L, 1]
-        filters  = filters.unsqueeze(1).unsqueeze(-1)
+        filters = filters.unsqueeze(1).unsqueeze(-1)
         # [1, 2, 1, 1, L]
         filters_T = filters.transpose(-2, -1).transpose(0, 1)
 
@@ -172,6 +173,7 @@ class WaveletTransformParameters2D(nn.Module):
 
         # [4, 1, L, L]
         return out.view(4, 1, L, L)
+
 
 class WaveletTransformAnalysis2D(nn.Module):
     def __init__(self, padding_mode: str = "reflect"):
@@ -190,7 +192,9 @@ class WaveletTransformAnalysis2D(nn.Module):
               - shape (B, 3, (N + L - 1) // 2, (M + L - 1) // 2), (low-high, high-low, high-high) coefficients
         """
         L = filters.shape[-1]
-        x_pad = torch.nn.functional.pad(x, (L - 1, L - 1, L - 1, L - 1), mode=self.padding_mode)
+        x_pad = torch.nn.functional.pad(
+            x, (L - 1, L - 1, L - 1, L - 1), mode=self.padding_mode
+        )
 
         y = torch.nn.functional.conv2d(
             x_pad,
