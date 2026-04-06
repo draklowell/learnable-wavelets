@@ -1,9 +1,6 @@
-from __future__ import annotations
-
 import io
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
 from zipfile import ZipFile
 
 import numpy as np
@@ -26,7 +23,7 @@ def _split_part_index(path: Path) -> int:
     return int(m.group(1))
 
 
-def _find_split_parts(zip_path: Path) -> List[Path]:
+def _find_split_parts(zip_path: Path) -> list[Path]:
     stem = zip_path.with_suffix("")
     parts = []
     for candidate in zip_path.parent.glob(f"{stem.name}.z*"):
@@ -35,7 +32,7 @@ def _find_split_parts(zip_path: Path) -> List[Path]:
     return sorted(parts, key=_split_part_index)
 
 
-def _build_combined_zip(split_parts: List[Path], last_zip_part: Path, out_zip: Path) -> Path:
+def _build_combined_zip(split_parts: list[Path], last_zip_part: Path, out_zip: Path) -> Path:
     out_zip.parent.mkdir(parents=True, exist_ok=True)
 
     latest_src_mtime = max([p.stat().st_mtime for p in split_parts] + [last_zip_part.stat().st_mtime])
@@ -75,7 +72,7 @@ class LIU4KDataset(Dataset):
         recursive: bool = True,
         return_class: bool = False,
         cache_dir: str | Path | None = None,
-    ):
+    ) -> None:
         super().__init__()
         self.root = Path(root)
         if not self.root.exists():
@@ -85,12 +82,12 @@ class LIU4KDataset(Dataset):
         self.return_class = return_class
         self.cache_dir = Path(cache_dir) if cache_dir is not None else (self.root / ".liu4k_cache")
 
-        self.samples: List[Tuple[str, str, int]] = []
+        self.samples: list[tuple[str, str, int]] = []
 
-        self.class_to_idx: Dict[str, int] = {}
-        self.classes: List[str] = []
+        self.class_to_idx: dict[str, int] = {}
+        self.classes: list[str] = []
 
-        self._zip_handles: Dict[Path, ZipFile] = {}
+        self._zip_handles: dict[Path, ZipFile] = {}
 
         self._index_dataset()
 
@@ -112,7 +109,7 @@ class LIU4KDataset(Dataset):
         combined_path = self.cache_dir / combined_name
         return _build_combined_zip(split_parts, zip_path, combined_path)
 
-    def _iter_paths(self) -> List[Path]:
+    def _iter_paths(self) -> list[Path]:
         if self.recursive:
             files = [p for p in self.root.rglob("*") if p.is_file()]
         else:
@@ -157,7 +154,7 @@ class LIU4KDataset(Dataset):
             self._zip_handles[path] = ZipFile(path, "r")
         return self._zip_handles[path]
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> torch.Tensor | tuple[torch.Tensor, int]:
         source_type, source_ref, class_idx = self.samples[index]
 
         if source_type == "file":
@@ -181,7 +178,7 @@ class LIU4KDataset(Dataset):
             zf.close()
         self._zip_handles.clear()
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.close()
 
 
@@ -220,5 +217,5 @@ def make_liu4k_dataloader(
 #    return_class=True           # return (images, class_indices). If False - returns only images
 #)
 
-# returns tensor of dimensions (batch_size, height, width) 
+# returns tensor of dimensions (batch_size, height, width)
 # with pixel values in [0, 1]
