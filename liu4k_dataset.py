@@ -8,7 +8,6 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
-
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 
@@ -32,10 +31,14 @@ def _find_split_parts(zip_path: Path) -> list[Path]:
     return sorted(parts, key=_split_part_index)
 
 
-def _build_combined_zip(split_parts: list[Path], last_zip_part: Path, out_zip: Path) -> Path:
+def _build_combined_zip(
+    split_parts: list[Path], last_zip_part: Path, out_zip: Path
+) -> Path:
     out_zip.parent.mkdir(parents=True, exist_ok=True)
 
-    latest_src_mtime = max([p.stat().st_mtime for p in split_parts] + [last_zip_part.stat().st_mtime])
+    latest_src_mtime = max(
+        [p.stat().st_mtime for p in split_parts] + [last_zip_part.stat().st_mtime]
+    )
     if out_zip.exists() and out_zip.stat().st_mtime >= latest_src_mtime:
         return out_zip
 
@@ -80,7 +83,9 @@ class LIU4KDataset(Dataset):
 
         self.recursive = recursive
         self.return_class = return_class
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else (self.root / ".liu4k_cache")
+        self.cache_dir = (
+            Path(cache_dir) if cache_dir is not None else (self.root / ".liu4k_cache")
+        )
 
         self.samples: list[tuple[str, str, int]] = []
 
@@ -182,7 +187,6 @@ class LIU4KDataset(Dataset):
         self.close()
 
 
-
 def make_liu4k_dataloader(
     root: str | Path,
     batch_size: int,
@@ -207,6 +211,7 @@ def make_liu4k_dataloader(
         pin_memory=pin_memory,
     )
 
+
 # example usage:
 # train_loader = make_liu4k_dataloader(
 #    root="path/to/my_dataset",  # path to dataset root directory
@@ -215,7 +220,7 @@ def make_liu4k_dataloader(
 #    num_workers=4,              # number of parallel processes for loading
 #    pin_memory=True,            # speeds up data transfer to GPU
 #    return_class=True           # return (images, class_indices). If False - returns only images
-#)
+# )
 
 # returns tensor of dimensions (batch_size, height, width)
 # with pixel values in [0, 1]
