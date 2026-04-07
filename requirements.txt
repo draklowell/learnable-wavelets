@@ -3,3 +3,4 @@ numpy
 pillow
 isort
 black
+black[jupyter]
