@@ -45,8 +45,10 @@ def get_wavelet(filters, J: int = 5):
 def get_reconstruction(x_rec, x):
     # Expects [-1, 1] range
 
-    original = (((x + 1) / 2) * 255).numpy().astype(np.uint8)
-    reconstruction = (((x_rec + 1) / 2) * 255).numpy().astype(np.uint8)
+    original = tools.change_range(x, -1, 1, 0, 255)
+    original = original.numpy().astype(np.uint8)
+    reconstruction = tools.change_range(x_rec, -1, 1, 0, 255)
+    reconstruction = reconstruction.numpy().astype(np.uint8)
 
     return {
         "original": wandb.Image(original, caption="Original Image", normalize=False),

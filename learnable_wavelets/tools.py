@@ -50,3 +50,7 @@ def compute_wavelet(filters, J: int = 5):
     w = 2 * np.pi * np.fft.rfftfreq(len(psi), d=dt)
 
     return phi, psi, t, w, Psi
+
+
+def change_range(x, old_min, old_max, new_min, new_max):
+    return (x - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
