@@ -1,4 +1,4 @@
-from learnable_wavelets import plots
+from learnable_wavelets import plots, tools, wandb
 from learnable_wavelets.model import (
     WaveletTransformAnalysis1D,
     WaveletTransformAnalysis2D,
@@ -12,6 +12,7 @@ from learnable_wavelets.model import (
     WaveletTransformSynthesisMultiLevel2D,
     l1_sparsity_loss,
     mse_loss,
+    psnr_metric,
 )
 
 __all__ = (
@@ -27,5 +28,8 @@ __all__ = (
     "WaveletTransformSynthesisMultiLevel2D",
     "mse_loss",
     "l1_sparsity_loss",
+    "psnr_metric",
     "plots",
+    "tools",
+    "wandb",
 )

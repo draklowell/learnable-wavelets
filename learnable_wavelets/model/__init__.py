@@ -3,6 +3,7 @@ from learnable_wavelets.model.filters import (
     WaveletTransformParameters2D,
 )
 from learnable_wavelets.model.loss import l1_sparsity_loss, mse_loss
+from learnable_wavelets.model.metrics import psnr_metric
 from learnable_wavelets.model.transformation import (
     WaveletTransformAnalysis1D,
     WaveletTransformAnalysis2D,
@@ -27,4 +28,5 @@ __all__ = (
     "WaveletTransformSynthesisMultiLevel2D",
     "mse_loss",
     "l1_sparsity_loss",
+    "psnr_metric",
 )
