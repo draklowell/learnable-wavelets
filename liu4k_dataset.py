@@ -1,5 +1,9 @@
 import io
 import re
+import threading
+import zipfile
+from bisect import bisect_right
+from contextlib import contextmanager
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -10,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 SPLIT_PART_PATTERN = re.compile(r"\.z\d+", re.IGNORECASE)
+_ZIPFILE_PATCH_LOCK = threading.Lock()
 
 
 def _is_image_file(name: str) -> bool:
@@ -32,34 +37,290 @@ def _find_split_parts(zip_path: Path) -> list[Path]:
     return sorted(parts, key=_split_part_index)
 
 
-def _build_combined_zip(
-    split_parts: list[Path], last_zip_part: Path, out_zip: Path
-) -> Path:
-    out_zip.parent.mkdir(parents=True, exist_ok=True)
+@contextmanager
+def _allow_multidisk_zipfile():
+    original = zipfile._EndRecData64
 
-    latest_src_mtime = max(
-        [p.stat().st_mtime for p in split_parts] + [last_zip_part.stat().st_mtime]
-    )
-    if out_zip.exists() and out_zip.stat().st_mtime >= latest_src_mtime:
-        return out_zip
+    def _patched_endrecdata64(fpin, offset, endrec):
+        try:
+            return original(fpin, offset, endrec)
+        except BadZipFile as exc:
+            if "span multiple disks" not in str(exc):
+                raise
 
-    with out_zip.open("wb") as out_f:
-        for part in split_parts:
-            with part.open("rb") as in_f:
-                while True:
-                    chunk = in_f.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    out_f.write(chunk)
+            try:
+                fpin.seek(offset - zipfile.sizeEndCentDir64Locator, 2)
+            except OSError:
+                return endrec
 
-        with last_zip_part.open("rb") as in_f:
-            while True:
-                chunk = in_f.read(1024 * 1024)
-                if not chunk:
-                    break
-                out_f.write(chunk)
+            data = fpin.read(zipfile.sizeEndCentDir64Locator)
+            if len(data) != zipfile.sizeEndCentDir64Locator:
+                return endrec
 
-    return out_zip
+            sig, _, reloff, _ = zipfile.struct.unpack(
+                zipfile.structEndArchive64Locator, data
+            )
+            if sig != zipfile.stringEndArchive64Locator:
+                return endrec
+
+            fpin.seek(offset - zipfile.sizeEndCentDir64Locator - zipfile.sizeEndCentDir64, 2)
+            data = fpin.read(zipfile.sizeEndCentDir64)
+            if len(data) != zipfile.sizeEndCentDir64:
+                return endrec
+
+            (
+                sig,
+                _sz,
+                _create_version,
+                _read_version,
+                disk_num,
+                disk_dir,
+                dircount,
+                dircount2,
+                dirsize,
+                diroffset,
+            ) = zipfile.struct.unpack(zipfile.structEndArchive64, data)
+            if sig != zipfile.stringEndArchive64:
+                return endrec
+
+            if disk_num != 0 or disk_dir != 0 or reloff >= 0:
+                diroffset += reloff
+
+            endrec[zipfile._ECD_SIGNATURE] = sig
+            endrec[zipfile._ECD_DISK_NUMBER] = 0
+            endrec[zipfile._ECD_DISK_START] = 0
+            endrec[zipfile._ECD_ENTRIES_THIS_DISK] = dircount2
+            endrec[zipfile._ECD_ENTRIES_TOTAL] = dircount2
+            endrec[zipfile._ECD_SIZE] = dirsize
+            endrec[zipfile._ECD_OFFSET] = diroffset
+            return endrec
+
+    with _ZIPFILE_PATCH_LOCK:
+        zipfile._EndRecData64 = _patched_endrecdata64
+        try:
+            yield
+        finally:
+            zipfile._EndRecData64 = original
+
+
+def _archive_parts(archive_path: Path) -> list[Path]:
+    split_parts = _find_split_parts(archive_path)
+    suffix = archive_path.suffix.lower()
+
+    if suffix == ".zip":
+        return [*split_parts, archive_path] if split_parts else [archive_path]
+
+    if SPLIT_PART_PATTERN.fullmatch(archive_path.suffix):
+        if split_parts:
+            return split_parts
+        return [archive_path]
+
+    return [archive_path]
+
+
+def _part_offsets(parts: list[Path]) -> list[int]:
+    offsets: list[int] = []
+    running = 0
+    for part in parts:
+        offsets.append(running)
+        running += part.stat().st_size
+    return offsets
+
+
+def _has_local_file_header(zf: ZipFile, offset: int) -> bool:
+    if offset < 0:
+        return False
+    current_pos = zf.fp.tell()
+    try:
+        zf.fp.seek(offset, io.SEEK_SET)
+        return zf.fp.read(4) == b"PK\x03\x04"
+    finally:
+        zf.fp.seek(current_pos, io.SEEK_SET)
+
+
+def _patch_split_member_offsets(zf: ZipFile, parts: list[Path]) -> None:
+    disk_offsets = _part_offsets(parts)
+    first_raw_offset = min((info.header_offset for info in zf.filelist), default=0)
+
+    current_pos = zf.fp.tell()
+    try:
+        zf.fp.seek(0, io.SEEK_SET)
+        prefix_probe = zf.fp.read(128)
+    finally:
+        zf.fp.seek(current_pos, io.SEEK_SET)
+
+    split_prefix_shift = prefix_probe.find(b"PK\x03\x04")
+    if split_prefix_shift < 0:
+        split_prefix_shift = 0
+
+    for info in zf.filelist:
+        volume = getattr(info, "volume", 0)
+        volume_shift = disk_offsets[volume] if 0 <= volume < len(disk_offsets) else 0
+        current_offset = info.header_offset
+
+        candidates = [
+            current_offset,
+            current_offset + volume_shift,
+            current_offset - first_raw_offset + split_prefix_shift,
+            current_offset - first_raw_offset + volume_shift + split_prefix_shift,
+        ]
+
+        seen = set()
+        for candidate_offset in candidates:
+            if candidate_offset in seen:
+                continue
+            seen.add(candidate_offset)
+
+            if _has_local_file_header(zf, candidate_offset):
+                info.header_offset = candidate_offset
+                break
+
+
+class _SplitZipStream(io.BufferedIOBase):
+
+    def __init__(self, parts: list[Path]) -> None:
+        super().__init__()
+        if not parts:
+            raise ValueError("Split archive requires at least one part")
+
+        self._files = [part.open("rb") for part in parts]
+        self._sizes = [part.stat().st_size for part in parts]
+        self._offsets = []
+        current = 0
+        for size in self._sizes:
+            self._offsets.append(current)
+            current += size
+        self._total_size = current
+        self._position = 0
+
+    def _locate_part(self, absolute_offset: int) -> int:
+        if absolute_offset >= self._total_size:
+            return len(self._offsets) - 1
+        idx = bisect_right(self._offsets, absolute_offset) - 1
+        return max(idx, 0)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._position + offset
+        elif whence == io.SEEK_END:
+            target = self._total_size + offset
+        else:
+            raise ValueError(f"Invalid whence: {whence}")
+
+        if target < 0:
+            raise ValueError("Negative seek position")
+
+        self._position = min(target, self._total_size)
+        return self._position
+
+    def read(self, size: int = -1) -> bytes:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+
+        if size is None or size < 0:
+            size = self._total_size - self._position
+
+        if size == 0 or self._position >= self._total_size:
+            return b""
+
+        remaining = min(size, self._total_size - self._position)
+        chunks = []
+
+        while remaining > 0:
+            part_idx = self._locate_part(self._position)
+            part_start = self._offsets[part_idx]
+            offset_inside_part = self._position - part_start
+            available_in_part = self._sizes[part_idx] - offset_inside_part
+            to_read = min(remaining, available_in_part)
+
+            f = self._files[part_idx]
+            f.seek(offset_inside_part)
+            chunk = f.read(to_read)
+            if not chunk:
+                break
+
+            chunks.append(chunk)
+            read_len = len(chunk)
+            self._position += read_len
+            remaining -= read_len
+
+            if read_len < to_read:
+                break
+
+        return b"".join(chunks)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        for f in self._files:
+            f.close()
+        super().close()
+
+
+@contextmanager
+def _open_archive_zip(zip_path: Path):
+    archive_parts = _archive_parts(zip_path)
+    if len(archive_parts) == 1 and archive_parts[0] == zip_path:
+        with ZipFile(zip_path, "r") as zf:
+            yield zf
+        return
+
+    stream = _SplitZipStream(archive_parts)
+    try:
+        with _allow_multidisk_zipfile():
+            with ZipFile(stream, "r") as zf:
+                _patch_split_member_offsets(zf, archive_parts)
+                yield zf
+    finally:
+        stream.close()
+
+
+def _iter_archives(all_files: list[Path]):
+    by_stem: dict[Path, list[Path]] = {}
+    for path in all_files:
+        if path.suffix.lower() == ".zip" or SPLIT_PART_PATTERN.fullmatch(path.suffix):
+            stem = path.with_suffix("")
+            by_stem.setdefault(stem, []).append(path)
+
+    for stem, parts in by_stem.items():
+        zip_candidate = next((p for p in parts if p.suffix.lower() == ".zip"), None)
+        if zip_candidate is not None:
+            yield zip_candidate
+            continue
+
+        split_only_parts = sorted(
+            [p for p in parts if SPLIT_PART_PATTERN.fullmatch(p.suffix)],
+            key=_split_part_index,
+        )
+        if split_only_parts:
+            yield split_only_parts[-1]
+
+
+def _archive_class_name(path: Path) -> str:
+    if path.suffix.lower() == ".zip":
+        return path.stem
+    if SPLIT_PART_PATTERN.fullmatch(path.suffix):
+        return path.with_suffix("").name
+    return path.stem
 
 
 def _iter_zip_image_chains(
@@ -122,9 +383,7 @@ class LIU4KDataset(Dataset):
         self.recursive = recursive
         self.return_class = return_class
         self.max_nested_zip_depth = max_nested_zip_depth
-        self.cache_dir = (
-            Path(cache_dir) if cache_dir is not None else (self.root / ".liu4k_cache")
-        )
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
 
         self.samples: list[tuple[str, str, int]] = []
 
@@ -132,6 +391,7 @@ class LIU4KDataset(Dataset):
         self.classes: list[str] = []
 
         self._zip_handles: dict[Path, ZipFile] = {}
+        self._zip_streams: dict[Path, _SplitZipStream] = {}
 
         self._index_dataset()
 
@@ -144,30 +404,12 @@ class LIU4KDataset(Dataset):
             self.classes.append(class_name)
         return self.class_to_idx[class_name]
 
-    def _resolve_archive(self, zip_path: Path) -> Path:
-        split_parts = _find_split_parts(zip_path)
-        if not split_parts:
-            return zip_path
-
-        combined_name = f"{zip_path.stem}__combined.zip"
-        combined_path = self.cache_dir / combined_name
-        return _build_combined_zip(split_parts, zip_path, combined_path)
-
     def _iter_paths(self) -> list[Path]:
         if self.recursive:
             files = [p for p in self.root.rglob("*") if p.is_file()]
         else:
             files = [p for p in self.root.iterdir() if p.is_file()]
-
-        cache_dir_resolved = self.cache_dir.resolve()
-        out = []
-        for p in files:
-            try:
-                p.resolve().relative_to(cache_dir_resolved)
-                continue
-            except ValueError:
-                out.append(p)
-        return out
+        return files
 
     def _index_dataset(self) -> None:
         all_files = self._iter_paths()
@@ -178,29 +420,35 @@ class LIU4KDataset(Dataset):
                 class_idx = self._class_index(class_name)
                 self.samples.append(("file", str(p.resolve()), class_idx))
 
-        zip_files = [p for p in all_files if p.suffix.lower() == ".zip"]
-        for zip_path in zip_files:
-            class_name = zip_path.stem
+        archive_files = list(_iter_archives(all_files))
+        for archive_path in archive_files:
+            class_name = _archive_class_name(archive_path)
             class_idx = self._class_index(class_name)
-
-            real_zip = self._resolve_archive(zip_path)
             try:
-                with ZipFile(real_zip, "r") as zf:
+                with _open_archive_zip(archive_path) as zf:
                     for chain in _iter_zip_image_chains(
                         zf,
                         max_nested_zip_depth=self.max_nested_zip_depth,
                     ):
-                        ref = f"{real_zip.resolve()}::{'||'.join(chain)}"
+                        ref = f"{archive_path.resolve()}::{'||'.join(chain)}"
                         self.samples.append(("zip", ref, class_idx))
             except BadZipFile as exc:
-                raise RuntimeError(f"Broken zip archive: {real_zip}") from exc
+                raise RuntimeError(f"Broken zip archive: {archive_path}") from exc
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def _get_zip(self, path: Path) -> ZipFile:
         if path not in self._zip_handles:
-            self._zip_handles[path] = ZipFile(path, "r")
+            archive_parts = _archive_parts(path)
+            if len(archive_parts) == 1 and archive_parts[0] == path:
+                self._zip_handles[path] = ZipFile(path, "r")
+            else:
+                stream = _SplitZipStream(archive_parts)
+                self._zip_streams[path] = stream
+                with _allow_multidisk_zipfile():
+                    self._zip_handles[path] = ZipFile(stream, "r")
+                _patch_split_member_offsets(self._zip_handles[path], archive_parts)
         return self._zip_handles[path]
 
     def __getitem__(self, index: int) -> torch.Tensor | tuple[torch.Tensor, int]:
@@ -251,6 +499,10 @@ class LIU4KDataset(Dataset):
             zf.close()
         self._zip_handles.clear()
 
+        for stream in self._zip_streams.values():
+            stream.close()
+        self._zip_streams.clear()
+
     def __del__(self) -> None:
         self.close()
 
@@ -280,17 +532,3 @@ def make_liu4k_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
-
-
-# example usage:
-# train_loader = make_liu4k_dataloader(
-#    root="path/to/my_dataset",  # path to dataset root directory
-#    batch_size=32,              # number of images in each batch
-#    shuffle=True,               # shuffle data
-#    num_workers=4,              # number of parallel processes for loading
-#    pin_memory=True,            # speeds up data transfer to GPU
-#    return_class=True           # return (images, class_indices). If False - returns only images
-# )
-
-# returns tensor of dimensions (batch_size, height, width)
-# with pixel values in [0, 1]
