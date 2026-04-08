@@ -12,13 +12,13 @@ description = "Learnable wavelets for signal and image processing"
 readme = "readme.md"
 requires-python = ">=3.12"
 dependencies = [
-  "torch",
-  "numpy",
-  "matplotlib",
+  "torch>=2.10.0",
+  "numpy>=2.0.0",
+  "matplotlib>=3.10.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "isort>=8.0.1",
-  "black[jupyter]>=26.3.1",
+  "isort>=8.0.0",
+  "black[jupyter]>=26.3.0",
 ]
