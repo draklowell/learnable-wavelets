@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_filters(filters, axes: tuple[plt.Axes, plt.Axes], J: int = 5):
+def plot_wavelet(filters, axes: tuple[plt.Axes, plt.Axes], J: int = 5):
     # Low-pass
     h = np.asarray(filters[0], dtype=float).squeeze()
     # High-pass
