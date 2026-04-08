@@ -10,7 +10,7 @@ from zipfile import BadZipFile, ZipFile
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 SPLIT_PART_PATTERN = re.compile(r"\.z\d+", re.IGNORECASE)
@@ -63,7 +63,9 @@ def _allow_multidisk_zipfile():
             if sig != zipfile.stringEndArchive64Locator:
                 return endrec
 
-            fpin.seek(offset - zipfile.sizeEndCentDir64Locator - zipfile.sizeEndCentDir64, 2)
+            fpin.seek(
+                offset - zipfile.sizeEndCentDir64Locator - zipfile.sizeEndCentDir64, 2
+            )
             data = fpin.read(zipfile.sizeEndCentDir64)
             if len(data) != zipfile.sizeEndCentDir64:
                 return endrec
@@ -485,7 +487,9 @@ class LIU4KDataset(Dataset):
                     nested_zip.close()
 
             if raw is None:
-                raise RuntimeError(f"Failed to load sample at index {index}: {source_ref}")
+                raise RuntimeError(
+                    f"Failed to load sample at index {index}: {source_ref}"
+                )
 
             with Image.open(io.BytesIO(raw)) as img:
                 x = _to_grayscale_tensor(img)
@@ -505,30 +509,3 @@ class LIU4KDataset(Dataset):
 
     def __del__(self) -> None:
         self.close()
-
-
-def make_liu4k_dataloader(
-    root: str | Path,
-    batch_size: int,
-    shuffle: bool = True,
-    num_workers: int = 0,
-    pin_memory: bool = False,
-    recursive: bool = True,
-    return_class: bool = False,
-    cache_dir: str | Path | None = None,
-    max_nested_zip_depth: int = 0,
-) -> DataLoader:
-    dataset = LIU4KDataset(
-        root=root,
-        recursive=recursive,
-        return_class=return_class,
-        cache_dir=cache_dir,
-        max_nested_zip_depth=max_nested_zip_depth,
-    )
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
