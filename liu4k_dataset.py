@@ -1,7 +1,7 @@
 import io
 import re
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 import numpy as np
 import torch
@@ -9,6 +9,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+SPLIT_PART_PATTERN = re.compile(r"\.z\d+", re.IGNORECASE)
 
 
 def _is_image_file(name: str) -> bool:
@@ -26,7 +27,7 @@ def _find_split_parts(zip_path: Path) -> list[Path]:
     stem = zip_path.with_suffix("")
     parts = []
     for candidate in zip_path.parent.glob(f"{stem.name}.z*"):
-        if re.fullmatch(r"\.z\d+", candidate.suffix.lower()):
+        if SPLIT_PART_PATTERN.fullmatch(candidate.suffix):
             parts.append(candidate)
     return sorted(parts, key=_split_part_index)
 
@@ -61,6 +62,42 @@ def _build_combined_zip(
     return out_zip
 
 
+def _iter_zip_image_chains(
+    zf: ZipFile,
+    prefix: tuple[str, ...] = (),
+    depth: int = 0,
+    max_nested_zip_depth: int = 2,
+):
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+
+        member_name = info.filename.replace("\\", "/")
+        chain = prefix + (member_name,)
+
+        if _is_image_file(member_name):
+            yield chain
+            continue
+
+        if not member_name.lower().endswith(".zip"):
+            continue
+
+        if depth >= max_nested_zip_depth:
+            continue
+
+        try:
+            nested_bytes = zf.read(info)
+            with ZipFile(io.BytesIO(nested_bytes), "r") as nested_zip:
+                yield from _iter_zip_image_chains(
+                    nested_zip,
+                    prefix=chain,
+                    depth=depth + 1,
+                    max_nested_zip_depth=max_nested_zip_depth,
+                )
+        except BadZipFile:
+            continue
+
+
 def _to_grayscale_tensor(image: Image.Image) -> torch.Tensor:
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     gray = rgb.mean(axis=2)
@@ -75,6 +112,7 @@ class LIU4KDataset(Dataset):
         recursive: bool = True,
         return_class: bool = False,
         cache_dir: str | Path | None = None,
+        max_nested_zip_depth: int = 0,
     ) -> None:
         super().__init__()
         self.root = Path(root)
@@ -83,6 +121,7 @@ class LIU4KDataset(Dataset):
 
         self.recursive = recursive
         self.return_class = return_class
+        self.max_nested_zip_depth = max_nested_zip_depth
         self.cache_dir = (
             Path(cache_dir) if cache_dir is not None else (self.root / ".liu4k_cache")
         )
@@ -145,11 +184,16 @@ class LIU4KDataset(Dataset):
             class_idx = self._class_index(class_name)
 
             real_zip = self._resolve_archive(zip_path)
-            with ZipFile(real_zip, "r") as zf:
-                for name in zf.namelist():
-                    if not name.endswith("/") and _is_image_file(name):
-                        ref = f"{real_zip.resolve()}::{name}"
+            try:
+                with ZipFile(real_zip, "r") as zf:
+                    for chain in _iter_zip_image_chains(
+                        zf,
+                        max_nested_zip_depth=self.max_nested_zip_depth,
+                    ):
+                        ref = f"{real_zip.resolve()}::{'||'.join(chain)}"
                         self.samples.append(("zip", ref, class_idx))
+            except BadZipFile as exc:
+                raise RuntimeError(f"Broken zip archive: {real_zip}") from exc
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -166,11 +210,35 @@ class LIU4KDataset(Dataset):
             with Image.open(source_ref) as img:
                 x = _to_grayscale_tensor(img)
         else:
-            zip_path_str, member_name = source_ref.split("::", 1)
+            zip_path_str, chain_str = source_ref.split("::", 1)
             zip_path = Path(zip_path_str)
             zf = self._get_zip(zip_path)
-            with zf.open(member_name, "r") as f:
-                raw = f.read()
+
+            member_chain = chain_str.split("||")
+            current_zip = zf
+            nested_zip_handles: list[ZipFile] = []
+            raw = None
+
+            try:
+                for i, member_name in enumerate(member_chain):
+                    is_last = i == len(member_chain) - 1
+                    with current_zip.open(member_name, "r") as f:
+                        data = f.read()
+
+                    if is_last:
+                        raw = data
+                        break
+
+                    nested_zip = ZipFile(io.BytesIO(data), "r")
+                    nested_zip_handles.append(nested_zip)
+                    current_zip = nested_zip
+            finally:
+                for nested_zip in nested_zip_handles:
+                    nested_zip.close()
+
+            if raw is None:
+                raise RuntimeError(f"Failed to load sample at index {index}: {source_ref}")
+
             with Image.open(io.BytesIO(raw)) as img:
                 x = _to_grayscale_tensor(img)
 
@@ -196,12 +264,14 @@ def make_liu4k_dataloader(
     recursive: bool = True,
     return_class: bool = False,
     cache_dir: str | Path | None = None,
+    max_nested_zip_depth: int = 0,
 ) -> DataLoader:
     dataset = LIU4KDataset(
         root=root,
         recursive=recursive,
         return_class=return_class,
         cache_dir=cache_dir,
+        max_nested_zip_depth=max_nested_zip_depth,
     )
     return DataLoader(
         dataset,
