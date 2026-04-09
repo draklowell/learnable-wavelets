@@ -19,3 +19,7 @@ Andrii Kryvyi
 [2nd video](https://www.youtube.com/watch?v=jzhA1d1t-H4)
 
 Luka Konovalov
+
+[1st video](https://youtu.be/dSwxDrCqkL8?si=O8WIAEGlVpyBj5h2)
+
+[2nd video](https://youtu.be/oG4GzJKf6Qk?si=MDLZQS8rI6TYDtgE)
