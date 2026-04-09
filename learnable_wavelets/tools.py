@@ -52,5 +52,7 @@ def compute_wavelet(filters, J: int = 5):
     return phi, psi, t, w, Psi
 
 
-def change_range(x, old_min, old_max, new_min, new_max):
+def change_range(x, range_old: tuple[float, float], range_new: tuple[float, float]):
+    old_min, old_max = range_old
+    new_min, new_max = range_new
     return (x - old_min) / (old_max - old_min) * (new_max - new_min) + new_min

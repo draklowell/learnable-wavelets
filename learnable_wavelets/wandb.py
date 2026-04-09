@@ -42,12 +42,10 @@ def get_wavelet(filters, J: int = 5):
     }
 
 
-def get_reconstruction(x_rec, x):
-    # Expects [-1, 1] range
-
-    original = tools.change_range(x, -1, 1, 0, 255)
+def get_reconstruction(x_rec, x, range_: tuple[float, float] = (-1.0, 1.0)):
+    original = tools.change_range(x, range_, (0, 255))
     original = original.numpy().astype(np.uint8)
-    reconstruction = tools.change_range(x_rec, -1, 1, 0, 255)
+    reconstruction = tools.change_range(x_rec, range_, (0, 255))
     reconstruction = reconstruction.numpy().astype(np.uint8)
 
     return {

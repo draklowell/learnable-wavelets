@@ -1,8 +1,8 @@
 import torch
 
 
-def psnr_metric(x_rec, x):
+def psnr_metric(x_rec, x, range_: tuple[float, float] = (-1.0, 1.0)):
     mse = torch.mean((x_rec - x) ** 2, dim=[1, 2])
-    max_ = torch.amax(x, dim=[1, 2]) ** 2
-    psnr = 10 * torch.log10(max_ / mse)
+    max_i = range_[1] - range_[0]
+    psnr = 20 * torch.log10(max_i) - 10 * torch.log10(mse)
     return torch.mean(psnr)
