@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import threading
 import zipfile
@@ -15,6 +16,10 @@ from torch.utils.data import Dataset
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 SPLIT_PART_PATTERN = re.compile(r"\.z\d+", re.IGNORECASE)
 _ZIPFILE_PATCH_LOCK = threading.Lock()
+DEFAULT_LIU4K_GDRIVE_URLS = {
+    "train": "https://drive.google.com/drive/folders/1FtVQtY2t_ecuy_gzJqZ-CatqrJBAdq_d",
+    "validation": "https://drive.google.com/drive/folders/1OCSXbWAlZ_im9oVIocOlr8tTjKFlOYM-",
+}
 
 
 def _is_image_file(name: str) -> bool:
@@ -367,6 +372,115 @@ def _to_grayscale_tensor(image: Image.Image) -> torch.Tensor:
     return torch.from_numpy(gray)
 
 
+def _looks_like_folder_url(url: str) -> bool:
+    lowered = url.lower()
+    return "drive.google.com" in lowered and "folders" in lowered
+
+
+def _download_liu4k_from_gdrive(
+    destination_dir: Path,
+    gdrive_url: str | None,
+    gdrive_file_id: str | None,
+    output_name: str,
+) -> None:
+    try:
+        import gdown
+    except ImportError as exc:
+        raise RuntimeError(
+            "Auto-download requires `gdown`. Install it with: pip install gdown"
+        ) from exc
+
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    if gdrive_url:
+        if _looks_like_folder_url(gdrive_url):
+            downloaded = gdown.download_folder(
+                url=gdrive_url,
+                output=str(destination_dir),
+                quiet=False,
+            )
+            if not downloaded:
+                raise RuntimeError("Google Drive folder download returned no files")
+            return
+
+        archive_path = destination_dir / output_name
+        downloaded_path = gdown.download(
+            url=gdrive_url,
+            output=str(archive_path),
+            quiet=False,
+            fuzzy=True,
+        )
+    elif gdrive_file_id:
+        archive_path = destination_dir / output_name
+        downloaded_path = gdown.download(
+            id=gdrive_file_id,
+            output=str(archive_path),
+            quiet=False,
+        )
+    else:
+        raise RuntimeError("Neither gdrive_url nor gdrive_file_id was provided")
+
+    if downloaded_path is None:
+        raise RuntimeError("Google Drive download failed")
+
+    downloaded_file = Path(downloaded_path)
+    if downloaded_file.suffix.lower() == ".zip":
+        with ZipFile(downloaded_file, "r") as zf:
+            zf.extractall(destination_dir)
+
+
+def _directory_has_files(directory: Path) -> bool:
+    try:
+        next(directory.iterdir())
+        return True
+    except StopIteration:
+        return False
+
+
+def _normalize_split_name(split: str | None) -> str | None:
+    if split is None:
+        return None
+    normalized = split.strip().lower()
+    aliases = {
+        "train": "train",
+        "training": "train",
+        "tr": "train",
+        "val": "validation",
+        "valid": "validation",
+        "validation": "validation",
+        "dev": "validation",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _guess_split_from_root(root: Path) -> str | None:
+    candidates = [root.name.lower(), root.parent.name.lower()]
+    for value in candidates:
+        guessed = _normalize_split_name(value)
+        if guessed in DEFAULT_LIU4K_GDRIVE_URLS:
+            return guessed
+    return None
+
+
+def _resolve_gdrive_source(
+    root: Path,
+    split: str | None,
+    gdrive_url: str | None,
+    gdrive_file_id: str | None,
+) -> tuple[str | None, str | None]:
+    resolved_url = gdrive_url or os.getenv("LIU4K_GDRIVE_URL")
+    resolved_file_id = gdrive_file_id or os.getenv("LIU4K_GDRIVE_FILE_ID")
+
+    if resolved_url or resolved_file_id:
+        return resolved_url, resolved_file_id
+
+    resolved_split = _normalize_split_name(split) or _guess_split_from_root(root)
+    if resolved_split in DEFAULT_LIU4K_GDRIVE_URLS:
+        return DEFAULT_LIU4K_GDRIVE_URLS[resolved_split], None
+
+    return None, None
+
+
 class LIU4KDataset(Dataset):
 
     def __init__(
@@ -376,11 +490,28 @@ class LIU4KDataset(Dataset):
         return_class: bool = False,
         cache_dir: str | Path | None = None,
         max_nested_zip_depth: int = 0,
+        auto_download_if_empty: bool = True,
+        split: str | None = None,
+        gdrive_url: str | None = None,
+        gdrive_file_id: str | None = None,
+        download_output_name: str = "liu4k_download.zip",
     ) -> None:
         super().__init__()
         self.root = Path(root)
-        if not self.root.exists():
-            raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
+        self.auto_download_if_empty = auto_download_if_empty
+        self.split = _normalize_split_name(split)
+        self.gdrive_url, self.gdrive_file_id = _resolve_gdrive_source(
+            root=self.root,
+            split=self.split,
+            gdrive_url=gdrive_url,
+            gdrive_file_id=gdrive_file_id,
+        )
+        self.download_output_name = download_output_name
+
+        self._zip_handles: dict[Path, ZipFile] = {}
+        self._zip_streams: dict[Path, _SplitZipStream] = {}
+
+        self._ensure_dataset_present()
 
         self.recursive = recursive
         self.return_class = return_class
@@ -392,13 +523,42 @@ class LIU4KDataset(Dataset):
         self.class_to_idx: dict[str, int] = {}
         self.classes: list[str] = []
 
-        self._zip_handles: dict[Path, ZipFile] = {}
-        self._zip_streams: dict[Path, _SplitZipStream] = {}
-
         self._index_dataset()
 
         if not self.samples:
             raise RuntimeError(f"No images found in {self.root}")
+
+    def _ensure_dataset_present(self) -> None:
+        if not self.root.exists():
+            if not self.auto_download_if_empty:
+                raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
+            self.root.mkdir(parents=True, exist_ok=True)
+
+        if _directory_has_files(self.root):
+            return
+
+        if not self.auto_download_if_empty:
+            return
+
+        if not self.gdrive_url and not self.gdrive_file_id:
+            raise RuntimeError(
+                "Dataset folder is empty and auto-download is enabled, but no Google Drive "
+                "source was provided. Pass gdrive_url/gdrive_file_id or set "
+                "LIU4K_GDRIVE_URL / LIU4K_GDRIVE_FILE_ID. You can also pass split='train' "
+                "or split='validation' for built-in LIU4K links."
+            )
+
+        _download_liu4k_from_gdrive(
+            destination_dir=self.root,
+            gdrive_url=self.gdrive_url,
+            gdrive_file_id=self.gdrive_file_id,
+            output_name=self.download_output_name,
+        )
+
+        if not _directory_has_files(self.root):
+            raise RuntimeError(
+                f"Auto-download completed but dataset folder is still empty: {self.root}"
+            )
 
     def _class_index(self, class_name: str) -> int:
         if class_name not in self.class_to_idx:
@@ -499,13 +659,15 @@ class LIU4KDataset(Dataset):
         return x
 
     def close(self) -> None:
-        for zf in self._zip_handles.values():
+        zip_handles = getattr(self, "_zip_handles", {})
+        for zf in zip_handles.values():
             zf.close()
-        self._zip_handles.clear()
+        zip_handles.clear()
 
-        for stream in self._zip_streams.values():
+        zip_streams = getattr(self, "_zip_streams", {})
+        for stream in zip_streams.values():
             stream.close()
-        self._zip_streams.clear()
+        zip_streams.clear()
 
     def __del__(self) -> None:
         self.close()
