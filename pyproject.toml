@@ -19,6 +19,7 @@ dependencies = [
   "wandb>=0.25.0",
   "nbformat>=5.10.0",
   "gdown>=5.2.0",
+  "kagglehub>=0.3.0",
 ]
 
 [project.optional-dependencies]
