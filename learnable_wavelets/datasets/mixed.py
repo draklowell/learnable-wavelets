@@ -57,14 +57,7 @@ def _extract_supported_archives(root: Path) -> None:
     if not root.exists():
         return
 
-    archives = [
-        p
-        for p in root.iterdir()
-        if p.is_file()
-        and (
-            _is_supported_archive(p)
-        )
-    ]
+    archives = [p for p in root.iterdir() if p.is_file() and (_is_supported_archive(p))]
 
     for archive_path in archives:
         if archive_path.suffix.lower() == ".zip":
@@ -171,7 +164,9 @@ class _LIU4KSource(_Source):
 
 def _random_patch(image: torch.Tensor, patch_size: int) -> torch.Tensor:
     if image.ndim != 2:
-        raise ValueError(f"Expected 2D grayscale tensor, got shape: {tuple(image.shape)}")
+        raise ValueError(
+            f"Expected 2D grayscale tensor, got shape: {tuple(image.shape)}"
+        )
 
     image = image.to(torch.float32)
     height, width = image.shape
@@ -180,12 +175,16 @@ def _random_patch(image: torch.Tensor, patch_size: int) -> torch.Tensor:
         scale = max(patch_size / height, patch_size / width)
         new_h = int(np.ceil(height * scale))
         new_w = int(np.ceil(width * scale))
-        image = F.interpolate(
-            image.unsqueeze(0).unsqueeze(0),
-            size=(new_h, new_w),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0).squeeze(0)
+        image = (
+            F.interpolate(
+                image.unsqueeze(0).unsqueeze(0),
+                size=(new_h, new_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
         height, width = image.shape
 
     top = random.randint(0, height - patch_size)
@@ -221,7 +220,9 @@ class MixedCompressionDataset(Dataset):
             if source.length > 0 and weight > 0
         ]
         if not active_pairs:
-            raise RuntimeError("No active sources with positive weight and non-zero length")
+            raise RuntimeError(
+                "No active sources with positive weight and non-zero length"
+            )
 
         self.sources = [pair[0] for pair in active_pairs]
         self.weights = [pair[1] for pair in active_pairs]
@@ -281,7 +282,9 @@ def build_mixed_compression_dataloader(
     source_probs: list[float] = []
 
     if weights.get("liu4k", 0) > 0:
-        resolved_liu4k_root = Path(liu4k_root) if liu4k_root is not None else Path("liu4k") / liu4k_split
+        resolved_liu4k_root = (
+            Path(liu4k_root) if liu4k_root is not None else Path("liu4k") / liu4k_split
+        )
         sources.append(
             _LIU4KSource(
                 name="liu4k",
@@ -304,7 +307,11 @@ def build_mixed_compression_dataloader(
 
     if weights.get("div2k", 0) > 0:
         prepared_root = _prepare_dataset_root(
-            Path(div2k_root) if div2k_root is not None else _default_dataset_root("div2k"),
+            (
+                Path(div2k_root)
+                if div2k_root is not None
+                else _default_dataset_root("div2k")
+            ),
             auto_extract_archives=auto_extract_archives,
             kaggle_dataset_slug=div2k_kaggle_slug,
             enable_kaggle_fallback=enable_kaggle_fallback,
