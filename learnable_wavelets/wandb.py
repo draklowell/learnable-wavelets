@@ -1,6 +1,6 @@
 import numpy as np
-import wandb
 
+import wandb
 from learnable_wavelets import tools
 from learnable_wavelets.tools import compute_wavelet
 

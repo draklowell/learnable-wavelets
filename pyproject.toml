@@ -20,6 +20,8 @@ dependencies = [
   "nbformat>=5.10.0",
   "gdown>=5.2.0",
   "kagglehub>=0.3.0",
+  "PyYAML>=6.0.0",
+  "pydantic>=2.13.0",
 ]
 
 [project.optional-dependencies]

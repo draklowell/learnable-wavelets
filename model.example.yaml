@@ -1,0 +1,24 @@
+wavelets:
+  - name: haar
+    support_size: 2
+  - name: sym2
+    support_size: 4
+tree:
+  wavelet: haar
+  padding: reflect
+  hh:
+    wavelet: haar
+    padding: reflect
+    hh: keep
+    hl: drop
+    lh: keep
+    ll: drop
+  hl: keep
+  lh: drop
+  ll:
+    wavelet: sym2
+    padding: reflect
+    hh: keep
+    hl: keep
+    lh: drop
+    ll: drop
