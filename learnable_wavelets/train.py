@@ -34,11 +34,15 @@ class Train:
         self.log_validation = log_validation
 
         self.epoch = 0
+        self.step = 0
 
         self.device = device
         self.module = torch.compile(module.to(device), mode="max-autotune")
         self.module = module.to(device)
         self.no_progress_epochs = 0
+        self.last_val_loss = None
+        self.last_val_step = 0
+        self.stopped = False
 
         self.optimizer = optimizer_factory(self.module.parameters())
 
@@ -52,19 +56,27 @@ class Train:
         loss.backward()
         self.optimizer.step()
 
-        self.log_train(self.epoch, loss.item())
+        self.log_train(self.epoch, self.step, loss.item())
 
     def validation_step(self, x):
         self.module.eval()
 
         with torch.no_grad():
             x_rec = self.module(x)
-            self.log_validation(self.epoch, x_rec, x)
+            self.log_validation(self.epoch, self.step, x_rec, x)
             return mse_loss(x_rec, x).item()
 
     def run_epoch(self):
         for batch in self.train_loader:
             self.train_step(batch.to(self.device))
+            self.step += 1
+            if self.stopped:
+                break
+
+    def validate(self):
+        if self.last_val_step == self.step:
+            return
+        self.last_val_step = self.step
 
         val_iter = iter(self.val_loader)
         batch = next(val_iter)
@@ -78,25 +90,27 @@ class Train:
         except StopIteration:
             pass
 
-        return loss
+        if self.last_val_loss is None:
+            self.last_val_loss = loss
+            return
+
+        if self.last_val_loss - loss < self.delta:
+            self.no_progress_epochs += 1
+
+        if self.no_progress_epochs >= self.patience:
+            print(
+                f"Early stopping at {self.epoch}/{self.step} with validation loss {loss}"
+            )
+            self.stopped = True
+
+        self.last_val_loss = loss
 
     def run(self):
-        last_val_loss = None
         for epoch in range(self.max_epochs):
             self.epoch = epoch
-            val_loss = self.run_epoch()
 
-            if last_val_loss is None:
-                last_val_loss = val_loss
-                continue
+            self.run_epoch()
+            self.validate()
 
-            if last_val_loss - val_loss < self.delta:
-                self.no_progress_epochs += 1
-
-            if self.no_progress_epochs >= self.patience:
-                print(
-                    f"Early stopping at epoch {epoch} with validation loss {val_loss}"
-                )
+            if self.stopped:
                 break
-
-            last_val_loss = val_loss
