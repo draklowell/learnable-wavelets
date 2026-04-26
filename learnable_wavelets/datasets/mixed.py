@@ -327,7 +327,7 @@ class MixedImageVisionDataset(VisionDataset):
                 Path(bsd_root) if bsd_root is not None else _default_dataset_root("bsd"),
                 auto_extract_archives=auto_extract_archives,
                 kaggle_dataset_slug=bsd_kaggle_slug,
-                enableqq_kaggle_fallback=enable_kaggle_fallback,
+                enable_kaggle_fallback=enable_kaggle_fallback,
             )
             self._sources.append(_ImageFolderSource(name="bsd", root=bsd_prepared))
 
