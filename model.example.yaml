@@ -1,13 +1,13 @@
 wavelets:
-  - name: haar
+  - name: wv1
     support_size: 2
-  - name: sym2
+  - name: wv2
     support_size: 4
 tree:
-  wavelet: haar
+  wavelet: wv1
   padding: reflect
   hh:
-    wavelet: haar
+    wavelet: wv2
     padding: reflect
     hh: keep
     hl: drop
@@ -16,7 +16,7 @@ tree:
   hl: keep
   lh: drop
   ll:
-    wavelet: sym2
+    wavelet: wv1
     padding: reflect
     hh: keep
     hl: keep
