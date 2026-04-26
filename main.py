@@ -11,6 +11,8 @@ from learnable_wavelets.model.loss import mse_loss
 from learnable_wavelets.module import WaveletModule
 from learnable_wavelets.train import Train
 
+### Configuration ###
+PROJECT_NAME = "wavelets"
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
 VALIDATION_SIZE = 10000
@@ -26,6 +28,7 @@ IMAGE_DTYPE = torch.float32
 PARAMS_DTYPE = torch.float64
 LOG_INTERVAL = 50
 VAL_INTERVAL = 1000
+SPLIT_SEED = 42
 
 MODEL_CONFIG = load_config(CONFIG_PATH)
 CONFIG = {
@@ -42,11 +45,13 @@ CONFIG = {
     "model_config": MODEL_CONFIG,
     "log_interval": LOG_INTERVAL,
     "val_interval": VAL_INTERVAL,
+    "split_seed": SPLIT_SEED,
 }
+### Configuration ###
 
 
 wandb.init(
-    project="wavelets-test",
+    project=PROJECT_NAME,
     config=CONFIG,
 )
 
@@ -65,7 +70,7 @@ class ImageOnlyDataset(Dataset):
 
 train_dataset = MixedImageVisionDataset(
     split="train",
-    split_seed=42,
+    split_seed=wandb.config.split_seed,
     include_liu4k=False,
     transform=transforms.Compose(
         [
@@ -92,7 +97,7 @@ val_size = wandb.config.validation_size
 
 val_dataset_full = MixedImageVisionDataset(
     split="valid",
-    split_seed=42,
+    split_seed=wandb.config.split_seed,
     include_liu4k=False,
     transform=transforms.Compose(
         [
@@ -113,7 +118,6 @@ val_loader = data.DataLoader(
     batch_size=val_size,
     shuffle=False,
     num_workers=1,
-    download=True,
 )
 
 
