@@ -69,7 +69,9 @@ def _extract_supported_archives(root: Path) -> None:
             tf.extractall(root)
 
 
-def _try_kaggle_download(dataset_slug: str, retries: int = 3, retry_delay_sec: float = 2.0) -> Path:
+def _try_kaggle_download(
+    dataset_slug: str, retries: int = 3, retry_delay_sec: float = 2.0
+) -> Path:
     try:
         import kagglehub
     except ImportError as exc:
@@ -276,7 +278,9 @@ class MixedImageVisionDataset(VisionDataset):
         bsd_kaggle_slug: str = "balraj98/berkeley-segmentation-dataset-500-bsds500",
         return_source_name: bool = False,
     ) -> None:
-        super().__init__(root=".", transform=transform, target_transform=target_transform)
+        super().__init__(
+            root=".", transform=transform, target_transform=target_transform
+        )
 
         split = split.lower()
         if split not in {"train", "valid", "validation", "all"}:
@@ -293,7 +297,9 @@ class MixedImageVisionDataset(VisionDataset):
 
         if include_liu4k:
             resolved_liu4k_root = (
-                Path(liu4k_root) if liu4k_root is not None else Path("liu4k") / liu4k_download_split
+                Path(liu4k_root)
+                if liu4k_root is not None
+                else Path("liu4k") / liu4k_download_split
             )
             self._sources.append(
                 _LIU4KImageSource(
@@ -306,7 +312,11 @@ class MixedImageVisionDataset(VisionDataset):
 
         if include_coco:
             coco_prepared = _prepare_dataset_root(
-                Path(coco_root) if coco_root is not None else _default_dataset_root("coco"),
+                (
+                    Path(coco_root)
+                    if coco_root is not None
+                    else _default_dataset_root("coco")
+                ),
                 auto_extract_archives=auto_extract_archives,
                 kaggle_dataset_slug=coco_kaggle_slug,
                 enable_kaggle_fallback=enable_kaggle_fallback,
@@ -315,7 +325,11 @@ class MixedImageVisionDataset(VisionDataset):
 
         if include_div2k:
             div2k_prepared = _prepare_dataset_root(
-                Path(div2k_root) if div2k_root is not None else _default_dataset_root("div2k"),
+                (
+                    Path(div2k_root)
+                    if div2k_root is not None
+                    else _default_dataset_root("div2k")
+                ),
                 auto_extract_archives=auto_extract_archives,
                 kaggle_dataset_slug=div2k_kaggle_slug,
                 enable_kaggle_fallback=enable_kaggle_fallback,
@@ -324,7 +338,11 @@ class MixedImageVisionDataset(VisionDataset):
 
         if include_bsd:
             bsd_prepared = _prepare_dataset_root(
-                Path(bsd_root) if bsd_root is not None else _default_dataset_root("bsd"),
+                (
+                    Path(bsd_root)
+                    if bsd_root is not None
+                    else _default_dataset_root("bsd")
+                ),
                 auto_extract_archives=auto_extract_archives,
                 kaggle_dataset_slug=bsd_kaggle_slug,
                 enable_kaggle_fallback=enable_kaggle_fallback,
@@ -347,7 +365,9 @@ class MixedImageVisionDataset(VisionDataset):
         if not self._samples:
             raise RuntimeError("No images available for the selected split and sources")
 
-        self.active_sources = [(source.name, len(source)) for source in self._sources if len(source) > 0]
+        self.active_sources = [
+            (source.name, len(source)) for source in self._sources if len(source) > 0
+        ]
 
     def __len__(self) -> int:
         return len(self._samples)
