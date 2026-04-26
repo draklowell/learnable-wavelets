@@ -1,15 +1,15 @@
+import hashlib
 import importlib.util
-import random
+import io
 import tarfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-import torch
-import torch.nn.functional as F
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
+from torchvision.datasets import VisionDataset
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
@@ -31,7 +31,7 @@ def _is_image_file(path: Path) -> bool:
 def _collect_image_files(root: Path) -> list[Path]:
     if not root.exists():
         return []
-    return [p for p in root.rglob("*") if p.is_file() and _is_image_file(p)]
+    return sorted([p for p in root.rglob("*") if p.is_file() and _is_image_file(p)])
 
 
 def _is_supported_archive(path: Path) -> bool:
@@ -57,7 +57,7 @@ def _extract_supported_archives(root: Path) -> None:
     if not root.exists():
         return
 
-    archives = [p for p in root.iterdir() if p.is_file() and (_is_supported_archive(p))]
+    archives = [p for p in root.iterdir() if p.is_file() and _is_supported_archive(p)]
 
     for archive_path in archives:
         if archive_path.suffix.lower() == ".zip":
@@ -69,18 +69,7 @@ def _extract_supported_archives(root: Path) -> None:
             tf.extractall(root)
 
 
-def _to_gray_tensor(image: Image.Image) -> torch.Tensor:
-    arr = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    gray = arr.mean(axis=2)
-    return torch.from_numpy(gray)
-
-
-def _load_image_tensor(path: Path) -> torch.Tensor:
-    with Image.open(path) as img:
-        return _to_gray_tensor(img)
-
-
-def _try_kaggle_download(dataset_slug: str) -> Path:
+def _try_kaggle_download(dataset_slug: str, retries: int = 3, retry_delay_sec: float = 2.0) -> Path:
     try:
         import kagglehub
     except ImportError as exc:
@@ -88,8 +77,16 @@ def _try_kaggle_download(dataset_slug: str) -> Path:
             "Kaggle fallback requires `kagglehub`. Install it with: pip install kagglehub"
         ) from exc
 
-    downloaded_path = kagglehub.dataset_download(dataset_slug)
-    return Path(downloaded_path)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return Path(kagglehub.dataset_download(dataset_slug))
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(retry_delay_sec)
+
+    raise RuntimeError(f"Kaggle download failed for {dataset_slug}") from last_error
 
 
 def _prepare_dataset_root(
@@ -115,36 +112,89 @@ def _prepare_dataset_root(
     return root
 
 
-@dataclass
-class _Source:
-    name: str
-    length: int
+def _stable_train_membership(key: str, split_seed: int, train_ratio: float) -> bool:
+    digest = hashlib.md5(f"{split_seed}:{key}".encode("utf-8")).hexdigest()
+    value = int(digest[:8], 16) / 0xFFFFFFFF
+    return value < train_ratio
 
-    def get_image(self, index: int) -> torch.Tensor:
+
+def _build_patch_transform(
+    *,
+    split: str,
+    patch_size: int,
+    normalize_mean: float | None = 0.5,
+    normalize_std: float | None = 0.5,
+):
+    try:
+        from torchvision import transforms as T
+    except ImportError as exc:
+        raise RuntimeError(
+            "Patch transforms require torchvision. Install it with: pip install torchvision"
+        ) from exc
+
+    if split == "train":
+        crop = T.RandomCrop(patch_size, pad_if_needed=True)
+    else:
+        crop = T.CenterCrop(patch_size)
+
+    ops = [
+        crop,
+        T.Grayscale(num_output_channels=1),
+        T.ToTensor(),
+    ]
+    if normalize_mean is not None and normalize_std is not None:
+        ops.append(T.Normalize((normalize_mean,), (normalize_std,)))
+
+    return T.Compose(ops)
+
+
+def _default_dataset_root(name: str) -> Path:
+    return Path(".datasets") / name
+
+
+@dataclass
+class _DatasetSource:
+    name: str
+
+    def __len__(self) -> int:
+        raise NotImplementedError
+
+    def key_at(self, index: int) -> str:
+        raise NotImplementedError
+
+    def pil_image_at(self, index: int) -> Image.Image:
         raise NotImplementedError
 
     def close(self) -> None:
         return None
 
 
-class _ImageFolderSource(_Source):
+class _ImageFolderSource(_DatasetSource):
     def __init__(self, name: str, root: Path) -> None:
+        self.name = name
         self._paths = _collect_image_files(root)
-        super().__init__(name=name, length=len(self._paths))
 
-    def get_image(self, index: int) -> torch.Tensor:
-        return _load_image_tensor(self._paths[index])
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    def key_at(self, index: int) -> str:
+        return str(self._paths[index].resolve())
+
+    def pil_image_at(self, index: int) -> Image.Image:
+        with Image.open(self._paths[index]) as img:
+            return img.convert("RGB")
 
 
-class _LIU4KSource(_Source):
+class _LIU4KImageSource(_DatasetSource):
     def __init__(
         self,
         *,
         name: str,
         root: Path,
-        split: str | None,
+        split: str,
         auto_download_if_empty: bool,
     ) -> None:
+        self.name = name
         liu4k_dataset_class = _load_liu4k_dataset_class()
         self._dataset = liu4k_dataset_class(
             root=root,
@@ -153,194 +203,233 @@ class _LIU4KSource(_Source):
             return_class=False,
             max_nested_zip_depth=0,
         )
-        super().__init__(name=name, length=len(self._dataset))
+        self._samples = self._dataset.samples
 
-    def get_image(self, index: int) -> torch.Tensor:
-        return self._dataset[index]
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def key_at(self, index: int) -> str:
+        source_type, source_ref, _ = self._samples[index]
+        return f"{source_type}:{source_ref}"
+
+    def pil_image_at(self, index: int) -> Image.Image:
+        source_type, source_ref, _ = self._samples[index]
+        if source_type == "file":
+            with Image.open(source_ref) as img:
+                return img.convert("RGB")
+
+        zip_path_str, chain_str = source_ref.split("::", 1)
+        zip_path = Path(zip_path_str)
+        zf = self._dataset._get_zip(zip_path)
+
+        current_zip = zf
+        nested_zip_handles: list[zipfile.ZipFile] = []
+        raw = None
+        try:
+            for i, member_name in enumerate(chain_str.split("||")):
+                is_last = i == len(chain_str.split("||")) - 1
+                with current_zip.open(member_name, "r") as f:
+                    data = f.read()
+                if is_last:
+                    raw = data
+                    break
+                nested_zip = zipfile.ZipFile(io.BytesIO(data), "r")
+                nested_zip_handles.append(nested_zip)
+                current_zip = nested_zip
+        finally:
+            for handle in nested_zip_handles:
+                handle.close()
+
+        if raw is None:
+            raise RuntimeError(f"Failed to read LIU4K sample at index {index}")
+
+        with Image.open(io.BytesIO(raw)) as img:
+            return img.convert("RGB")
 
     def close(self) -> None:
         self._dataset.close()
 
 
-def _random_patch(image: torch.Tensor, patch_size: int) -> torch.Tensor:
-    if image.ndim != 2:
-        raise ValueError(
-            f"Expected 2D grayscale tensor, got shape: {tuple(image.shape)}"
-        )
-
-    image = image.to(torch.float32)
-    height, width = image.shape
-
-    if height < patch_size or width < patch_size:
-        scale = max(patch_size / height, patch_size / width)
-        new_h = int(np.ceil(height * scale))
-        new_w = int(np.ceil(width * scale))
-        image = (
-            F.interpolate(
-                image.unsqueeze(0).unsqueeze(0),
-                size=(new_h, new_w),
-                mode="bilinear",
-                align_corners=False,
-            )
-            .squeeze(0)
-            .squeeze(0)
-        )
-        height, width = image.shape
-
-    top = random.randint(0, height - patch_size)
-    left = random.randint(0, width - patch_size)
-    patch = image[top : top + patch_size, left : left + patch_size]
-    return patch.unsqueeze(0)
-
-
-def _default_dataset_root(name: str) -> Path:
-    return Path(".datasets") / name
-
-
-class MixedCompressionDataset(Dataset):
+class MixedImageVisionDataset(VisionDataset):
     def __init__(
         self,
         *,
-        sources: list[_Source],
-        source_weights: list[float],
-        patch_size: int = 128,
-        epoch_length: int = 40000,
+        split: str = "train",
+        train_ratio: float = 0.9,
+        split_seed: int = 42,
+        transform=None,
+        target_transform=None,
+        liu4k_root: str | Path | None = None,
+        include_liu4k: bool = True,
+        liu4k_download_split: str = "train",
+        liu4k_auto_download_if_empty: bool = True,
+        coco_root: str | Path | None = None,
+        include_coco: bool = False,
+        div2k_root: str | Path | None = None,
+        include_div2k: bool = True,
+        bsd_root: str | Path | None = None,
+        include_bsd: bool = True,
+        auto_extract_archives: bool = True,
+        enable_kaggle_fallback: bool = True,
+        coco_kaggle_slug: str = "awsaf49/coco-2017-dataset",
+        div2k_kaggle_slug: str = "soumikrakshit/div2k-high-resolution-images",
+        bsd_kaggle_slug: str = "balraj98/berkeley-segmentation-dataset-500-bsds500",
         return_source_name: bool = False,
     ) -> None:
-        if patch_size <= 0:
-            raise ValueError("patch_size must be positive")
-        if epoch_length <= 0:
-            raise ValueError("epoch_length must be positive")
-        if len(sources) != len(source_weights):
-            raise ValueError("sources and source_weights must have the same length")
+        super().__init__(root=".", transform=transform, target_transform=target_transform)
 
-        active_pairs = [
-            (source, float(weight))
-            for source, weight in zip(sources, source_weights)
-            if source.length > 0 and weight > 0
-        ]
-        if not active_pairs:
-            raise RuntimeError(
-                "No active sources with positive weight and non-zero length"
-            )
+        split = split.lower()
+        if split not in {"train", "valid", "validation", "all"}:
+            raise ValueError("split must be one of: train, valid, validation, all")
+        if not (0 < train_ratio < 1):
+            raise ValueError("train_ratio must be between 0 and 1")
 
-        self.sources = [pair[0] for pair in active_pairs]
-        self.weights = [pair[1] for pair in active_pairs]
-        total_weight = sum(self.weights)
-        self.probabilities = [w / total_weight for w in self.weights]
-        self.patch_size = patch_size
-        self.epoch_length = epoch_length
+        self.split = "valid" if split == "validation" else split
+        self.train_ratio = train_ratio
+        self.split_seed = split_seed
         self.return_source_name = return_source_name
 
+        self._sources: list[_DatasetSource] = []
+
+        if include_liu4k:
+            resolved_liu4k_root = (
+                Path(liu4k_root) if liu4k_root is not None else Path("liu4k") / liu4k_download_split
+            )
+            self._sources.append(
+                _LIU4KImageSource(
+                    name="liu4k",
+                    root=resolved_liu4k_root,
+                    split=liu4k_download_split,
+                    auto_download_if_empty=liu4k_auto_download_if_empty,
+                )
+            )
+
+        if include_coco:
+            coco_prepared = _prepare_dataset_root(
+                Path(coco_root) if coco_root is not None else _default_dataset_root("coco"),
+                auto_extract_archives=auto_extract_archives,
+                kaggle_dataset_slug=coco_kaggle_slug,
+                enable_kaggle_fallback=enable_kaggle_fallback,
+            )
+            self._sources.append(_ImageFolderSource(name="coco", root=coco_prepared))
+
+        if include_div2k:
+            div2k_prepared = _prepare_dataset_root(
+                Path(div2k_root) if div2k_root is not None else _default_dataset_root("div2k"),
+                auto_extract_archives=auto_extract_archives,
+                kaggle_dataset_slug=div2k_kaggle_slug,
+                enable_kaggle_fallback=enable_kaggle_fallback,
+            )
+            self._sources.append(_ImageFolderSource(name="div2k", root=div2k_prepared))
+
+        if include_bsd:
+            bsd_prepared = _prepare_dataset_root(
+                Path(bsd_root) if bsd_root is not None else _default_dataset_root("bsd"),
+                auto_extract_archives=auto_extract_archives,
+                kaggle_dataset_slug=bsd_kaggle_slug,
+                enableqq_kaggle_fallback=enable_kaggle_fallback,
+            )
+            self._sources.append(_ImageFolderSource(name="bsd", root=bsd_prepared))
+
+        self._samples: list[tuple[str, _DatasetSource, int]] = []
+        for source in self._sources:
+            for index in range(len(source)):
+                key = f"{source.name}::{source.key_at(index)}"
+                is_train = _stable_train_membership(key, split_seed, train_ratio)
+
+                if self.split == "all":
+                    self._samples.append((source.name, source, index))
+                elif self.split == "train" and is_train:
+                    self._samples.append((source.name, source, index))
+                elif self.split == "valid" and not is_train:
+                    self._samples.append((source.name, source, index))
+
+        if not self._samples:
+            raise RuntimeError("No images available for the selected split and sources")
+
+        self.active_sources = [(source.name, len(source)) for source in self._sources if len(source) > 0]
+
     def __len__(self) -> int:
-        return self.epoch_length
+        return len(self._samples)
 
     def __getitem__(self, index: int):
-        source = random.choices(self.sources, weights=self.probabilities, k=1)[0]
-        sample_idx = random.randrange(source.length)
-        image = source.get_image(sample_idx)
-        patch = _random_patch(image, self.patch_size)
+        source_name, source, source_index = self._samples[index]
+        image = source.pil_image_at(source_index)
+        target = source_name if self.return_source_name else 0
 
-        if self.return_source_name:
-            return patch, source.name
-        return patch
+        if self.transform is not None:
+            image = self.transform(image)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return image, target
 
     def close(self) -> None:
-        for source in self.sources:
+        for source in self._sources:
             source.close()
 
 
-def build_mixed_compression_dataloader(
+def build_mixed_vision_dataloader(
     *,
-    liu4k_root: str | Path | None = None,
-    coco_root: str | Path | None = None,
-    div2k_root: str | Path | None = None,
-    bsd_root: str | Path | None = None,
-    liu4k_split: str = "train",
+    split: str = "train",
+    train_ratio: float = 0.9,
+    split_seed: int = 42,
     patch_size: int = 128,
-    epoch_length: int = 40000,
     batch_size: int = 32,
     num_workers: int = 0,
     pin_memory: bool = False,
+    normalize_mean: float | None = 0.5,
+    normalize_std: float | None = 0.5,
+    liu4k_root: str | Path | None = None,
+    include_liu4k: bool = True,
+    liu4k_download_split: str = "train",
+    liu4k_auto_download_if_empty: bool = True,
+    coco_root: str | Path | None = None,
+    include_coco: bool = False,
+    div2k_root: str | Path | None = None,
+    include_div2k: bool = True,
+    bsd_root: str | Path | None = None,
+    include_bsd: bool = True,
     auto_extract_archives: bool = True,
     enable_kaggle_fallback: bool = True,
-    liu4k_auto_download_if_empty: bool = True,
     coco_kaggle_slug: str = "awsaf49/coco-2017-dataset",
     div2k_kaggle_slug: str = "soumikrakshit/div2k-high-resolution-images",
     bsd_kaggle_slug: str = "balraj98/berkeley-segmentation-dataset-500-bsds500",
-    source_weights: dict[str, float] | None = None,
     return_source_name: bool = False,
-) -> tuple[MixedCompressionDataset, DataLoader]:
-    weights = source_weights or {
-        "liu4k": 0.65,
-        "div2k": 0.25,
-        "coco": 0.0,
-        "bsd": 0.10,
-    }
-
-    sources: list[_Source] = []
-    source_probs: list[float] = []
-
-    if weights.get("liu4k", 0) > 0:
-        resolved_liu4k_root = (
-            Path(liu4k_root) if liu4k_root is not None else Path("liu4k") / liu4k_split
-        )
-        sources.append(
-            _LIU4KSource(
-                name="liu4k",
-                root=resolved_liu4k_root,
-                split=liu4k_split,
-                auto_download_if_empty=liu4k_auto_download_if_empty,
-            )
-        )
-        source_probs.append(weights["liu4k"])
-
-    if weights.get("coco", 0) > 0:
-        prepared_root = _prepare_dataset_root(
-            Path(coco_root) if coco_root is not None else _default_dataset_root("coco"),
-            auto_extract_archives=auto_extract_archives,
-            kaggle_dataset_slug=coco_kaggle_slug,
-            enable_kaggle_fallback=enable_kaggle_fallback,
-        )
-        sources.append(_ImageFolderSource(name="coco", root=prepared_root))
-        source_probs.append(weights["coco"])
-
-    if weights.get("div2k", 0) > 0:
-        prepared_root = _prepare_dataset_root(
-            (
-                Path(div2k_root)
-                if div2k_root is not None
-                else _default_dataset_root("div2k")
-            ),
-            auto_extract_archives=auto_extract_archives,
-            kaggle_dataset_slug=div2k_kaggle_slug,
-            enable_kaggle_fallback=enable_kaggle_fallback,
-        )
-        sources.append(_ImageFolderSource(name="div2k", root=prepared_root))
-        source_probs.append(weights["div2k"])
-
-    if weights.get("bsd", 0) > 0:
-        prepared_root = _prepare_dataset_root(
-            Path(bsd_root) if bsd_root is not None else _default_dataset_root("bsd"),
-            auto_extract_archives=auto_extract_archives,
-            kaggle_dataset_slug=bsd_kaggle_slug,
-            enable_kaggle_fallback=enable_kaggle_fallback,
-        )
-        sources.append(_ImageFolderSource(name="bsd", root=prepared_root))
-        source_probs.append(weights["bsd"])
-
-    dataset = MixedCompressionDataset(
-        sources=sources,
-        source_weights=source_probs,
+) -> tuple[MixedImageVisionDataset, DataLoader]:
+    transform = _build_patch_transform(
+        split="train" if split == "train" else "valid",
         patch_size=patch_size,
-        epoch_length=epoch_length,
+        normalize_mean=normalize_mean,
+        normalize_std=normalize_std,
+    )
+
+    dataset = MixedImageVisionDataset(
+        split=split,
+        train_ratio=train_ratio,
+        split_seed=split_seed,
+        transform=transform,
+        liu4k_root=liu4k_root,
+        include_liu4k=include_liu4k,
+        liu4k_download_split=liu4k_download_split,
+        liu4k_auto_download_if_empty=liu4k_auto_download_if_empty,
+        coco_root=coco_root,
+        include_coco=include_coco,
+        div2k_root=div2k_root,
+        include_div2k=include_div2k,
+        bsd_root=bsd_root,
+        include_bsd=include_bsd,
+        auto_extract_archives=auto_extract_archives,
+        enable_kaggle_fallback=enable_kaggle_fallback,
+        coco_kaggle_slug=coco_kaggle_slug,
+        div2k_kaggle_slug=div2k_kaggle_slug,
+        bsd_kaggle_slug=bsd_kaggle_slug,
         return_source_name=return_source_name,
     )
 
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=split == "train",
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
