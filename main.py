@@ -6,8 +6,8 @@ RUNNER_CONFIG = {
     "project_name": "lw-runs",
     "learning_rate": 0.001,
     "batch_size": 64,
-    "delta": 0.00001,  # needs tuning
-    "patience": 5,  # needs tuning
+    "delta": 1e-5,
+    "patience": 10,
     "max_epochs": 10,
     "patch_size": 128,
     "val_size": 6000,
