@@ -67,7 +67,7 @@ class Train:
 
     def run_epoch(self):
         for batch in self.train_loader:
-            self.train_step(batch.to(device=self.device))
+            self.train_step(batch.to(device=self.device, dtype=torch.float32))
             self.step += 1
             if self.stopped:
                 break
@@ -79,7 +79,7 @@ class Train:
 
         val_iter = iter(self.val_loader)
         batch = next(val_iter)
-        loss = self.validation_step(batch.to(device=self.device))
+        loss = self.validation_step(batch.to(device=self.device, dtype=torch.float32))
 
         try:
             next(val_iter)

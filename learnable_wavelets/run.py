@@ -9,7 +9,7 @@ from torchvision import datasets, transforms
 import wandb
 from learnable_wavelets import psnr_metric
 from learnable_wavelets import wandb as lw_wandb
-from learnable_wavelets.config import ModuleConfig, load_config
+from learnable_wavelets.config import ModuleConfig
 from learnable_wavelets.model.loss import mse_loss
 from learnable_wavelets.module import WaveletModule
 from learnable_wavelets.train import Train
@@ -39,7 +39,7 @@ class Run:
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.module = WaveletModule(config).to(dtype=run.config.params_dtype)
+        self.module = WaveletModule(config).to(dtype=torch.float64)
         self.train = Train(
             train_loader=self.train_loader,
             val_loader=self.val_loader,
