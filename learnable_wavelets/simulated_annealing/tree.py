@@ -83,6 +83,9 @@ class Tree:
         for node in self._iter_nodes(self.root):
             node.wavelet = rename_map[node.wavelet]
 
+    def copy(self) -> "Tree":
+        return copy.deepcopy(self)
+
     def get_hash(self, is_simple: bool = False) -> str:
         if not is_simple:
             self = copy.deepcopy(self)

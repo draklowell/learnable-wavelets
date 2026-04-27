@@ -1,0 +1,12 @@
+project_name: lw-master
+max_score: 0.25
+max_depth: 6
+new_wavelet_prob: 0.15
+support_sizes: [2, 4, 6, 8, 10, 12, 14, 16]
+random_seed: 42
+initial_config_path: configs/initial_model.yaml
+initial_temperature: 1.0
+cooling_rate: 0.95
+final_temperature: 1e-2
+batches_per_temperature: 1
+batch_size: 20

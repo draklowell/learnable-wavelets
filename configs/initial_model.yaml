@@ -1,0 +1,10 @@
+wavelets:
+  - name: wv1
+    support_size: 6
+tree:
+  wavelet: wv1
+  padding: reflect
+  hh: drop
+  hl: drop
+  lh: drop
+  ll: keep
