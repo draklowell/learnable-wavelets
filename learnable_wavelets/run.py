@@ -163,7 +163,7 @@ class Runner:
                     transforms.RandomCrop((config["patch_size"], config["patch_size"])),
                     transforms.RandomHorizontalFlip(),
                     transforms.RandomVerticalFlip(),
-                    transforms.ConvertImageDtype(config["image_dtype"]),
+                    transforms.ConvertImageDtype(torch.float32),
                     transforms.Grayscale(),
                     transforms.Lambda(lambda x: x * 2 - 1),
                 ]
@@ -185,7 +185,7 @@ class Runner:
                 [
                     transforms.ToTensor(),
                     transforms.CenterCrop((config["patch_size"], config["patch_size"])),
-                    transforms.ConvertImageDtype(config["image_dtype"]),
+                    transforms.ConvertImageDtype(torch.float32),
                     transforms.Grayscale(),
                     transforms.Lambda(lambda x: x * 2 - 1),
                 ]
