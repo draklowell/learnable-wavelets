@@ -18,10 +18,10 @@ class Train:
         delta: float = 1e-5,
         patience: int = 20,
         max_epochs: int = 1500,
-        log_train: Callable[[int, float], None] = lambda epoch, loss: None,
+        log_train: Callable[[int, int, float], None] = lambda epoch, step, loss: None,
         log_validation: Callable[
-            [int, torch.Tensor, torch.Tensor], None
-        ] = lambda epoch, x_rec, x: None,
+            [int, int, torch.Tensor, torch.Tensor], None
+        ] = lambda epoch, step, x_rec, x: None,
     ) -> None:
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -39,7 +39,7 @@ class Train:
         self.device = device
         self.module = torch.compile(module.to(device=device), mode="max-autotune")
         self.no_progress_epochs = 0
-        self.last_val_loss = None
+        self.best_loss = None
         self.last_val_step = 0
         self.stopped = False
 
@@ -89,20 +89,23 @@ class Train:
         except StopIteration:
             pass
 
-        if self.last_val_loss is None:
-            self.last_val_loss = loss
+        if self.best_loss is None:
+            self.best_loss = loss
             return
 
-        if self.last_val_loss - loss < self.delta:
+        if self.best_loss - loss < self.delta:
             self.no_progress_epochs += 1
+        else:
+            self.no_progress_epochs = 0
+
+        if loss < self.best_loss:
+            self.best_loss = loss
 
         if self.no_progress_epochs >= self.patience:
             print(
                 f"Early stopping at {self.epoch}/{self.step} with validation loss {loss}"
             )
             self.stopped = True
-
-        self.last_val_loss = loss
 
     def run(self):
         for epoch in range(self.max_epochs):
