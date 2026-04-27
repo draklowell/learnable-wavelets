@@ -155,7 +155,7 @@ class Runner:
     @staticmethod
     def _create_dataloaders(config: dict) -> tuple[data.DataLoader, data.DataLoader]:
         train_dataset = datasets.CelebA(
-            root="data/celeba",
+            root=config["dataset"],
             split="train",
             transform=transforms.Compose(
                 [
@@ -168,7 +168,6 @@ class Runner:
                     transforms.Lambda(lambda x: x * 2 - 1),
                 ]
             ),
-            download=True,
         )
 
         train_loader = data.DataLoader(
@@ -180,7 +179,7 @@ class Runner:
         )
 
         val_dataset_full = datasets.CelebA(
-            root="data/celeba",
+            root=config["dataset"],
             split="valid",
             transform=transforms.Compose(
                 [
@@ -191,7 +190,6 @@ class Runner:
                     transforms.Lambda(lambda x: x * 2 - 1),
                 ]
             ),
-            download=True,
         )
 
         val_size = min(config["val_size"], len(val_dataset_full))
