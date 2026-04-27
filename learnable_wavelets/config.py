@@ -1,15 +1,15 @@
-from enum import StrEnum
+from enum import Enum
 
 import yaml
 from pydantic import BaseModel, Field
 
 
-class LeafNode(StrEnum):
+class LeafNode(Enum):
     KEEP = "keep"
     DROP = "drop"
 
 
-class PaddingMode(StrEnum):
+class PaddingMode(Enum):
     REFLECT = "reflect"
     CONSTANT = "constant"
     CIRCULAR = "circular"
