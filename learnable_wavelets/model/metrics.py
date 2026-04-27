@@ -6,8 +6,8 @@ def psnr_metric(
 ):
     if loss is not None:
         mse = loss
-        device = loss.device
-        dtype = loss.dtype
+        device = "cpu"
+        dtype = torch.float32
     else:
         mse = torch.mean((x_rec - x) ** 2, dim=[1, 2])
         device = x.device
