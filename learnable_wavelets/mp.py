@@ -34,7 +34,8 @@ def trainer_worker(
             else:
                 value = float(value)
 
-            result_queue.put((worker_id, job_id, idx, hash_, value, None))
+            # Maximize PSNR by minimizing negative PSNR (energy)
+            result_queue.put((worker_id, job_id, idx, hash_, -value, None))
 
         except Exception:
             result_queue.put(
