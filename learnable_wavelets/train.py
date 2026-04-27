@@ -1,9 +1,11 @@
+import math
 from typing import Callable
 
 import torch
 from torch.utils.data import DataLoader
 
 from learnable_wavelets.model.loss import mse_loss
+from learnable_wavelets.model.metrics import psnr_metric
 from learnable_wavelets.module import WaveletModule
 
 
@@ -20,8 +22,8 @@ class Train:
         max_epochs: int = 1500,
         log_train: Callable[[int, int, float], None] = lambda epoch, step, loss: None,
         log_validation: Callable[
-            [int, int, torch.Tensor, torch.Tensor], None
-        ] = lambda epoch, step, x_rec, x: None,
+            [int, int, torch.Tensor, torch.Tensor, float, float], None
+        ] = lambda epoch, step, x_rec, x, loss, psnr: None,
     ) -> None:
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -38,7 +40,7 @@ class Train:
 
         self.device = device
         self.module = torch.compile(module.to(device=device), mode="max-autotune")
-        self.no_progress_epochs = 0
+        self.no_progress_steps = 0
         self.best_loss = None
         self.last_val_step = 0
         self.stopped = False
@@ -62,8 +64,7 @@ class Train:
 
         with torch.no_grad():
             x_rec = self.module(x)
-            self.log_validation(self.epoch, self.step, x_rec, x)
-            return mse_loss(x_rec, x).item()
+            return x_rec, mse_loss(x_rec, x).item() * len(x)
 
     def run_epoch(self):
         for batch in self.train_loader:
@@ -77,31 +78,41 @@ class Train:
             return
         self.last_val_step = self.step
 
-        val_iter = iter(self.val_loader)
-        batch = next(val_iter)
-        loss = self.validation_step(batch.to(device=self.device))
+        loss = 0
+        n = 0
+        example_original = None
+        example_reconstructed = None
+        for i, batch in enumerate(self.val_loader):
+            x_rec, loss_el = self.validation_step(batch.to(device=self.device))
 
-        try:
-            next(val_iter)
-            raise ValueError(
-                "Validation loader has more than one batch, which is not supported"
-            )
-        except StopIteration:
-            pass
+            if i == 0:
+                example_original = batch[0]
+            example_reconstructed = x_rec.cpu().detach()[0]
+
+            loss += loss_el
+            n += len(batch)
+
+        loss /= n
+        # Convert mean MSE into PSNR for range [-1, 1]
+        psnr = psnr_metric(loss=loss)
+
+        self.log_validation(
+            self.epoch, self.step, example_reconstructed, example_original, loss, psnr
+        )
 
         if self.best_loss is None:
             self.best_loss = loss
             return
 
         if self.best_loss - loss < self.delta:
-            self.no_progress_epochs += 1
+            self.no_progress_steps += 1
         else:
-            self.no_progress_epochs = 0
+            self.no_progress_steps = 0
 
         if loss < self.best_loss:
             self.best_loss = loss
 
-        if self.no_progress_epochs >= self.patience:
+        if self.no_progress_steps >= self.patience:
             print(
                 f"Early stopping at {self.epoch}/{self.step} with validation loss {loss}"
             )

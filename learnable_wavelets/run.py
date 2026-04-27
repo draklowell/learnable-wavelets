@@ -71,9 +71,7 @@ class Run:
 
         self.train.validate()
 
-    def log_validation(self, epoch, step, x_rec, x):
-        loss = mse_loss(x_rec, x).item()
-        psnr = psnr_metric(x_rec, x).item()
+    def log_validation(self, epoch, step, x_rec, x, loss, psnr):
         self.log(epoch, step, f"Validation: Loss = {loss:.6f}; PSNR = {psnr:.2f} dB")
 
         info = {"loss": loss, "psnr": psnr}
@@ -104,10 +102,7 @@ class Run:
 
             info["wavelets"][wavelet] = wavelet_info
 
-        reconstruction = lw_wandb.get_reconstruction(
-            x_rec[0].cpu().detach(),
-            x[0].cpu().detach(),
-        )
+        reconstruction = lw_wandb.get_reconstruction(x_rec, x)
         info["example"] = reconstruction
 
         self.run.log({"val": info, "epoch": epoch})
@@ -198,7 +193,7 @@ class Runner:
 
         val_loader = data.DataLoader(
             ImageOnlyDataset(val_dataset),
-            batch_size=val_size,
+            batch_size=config["val_batch_size"],
             shuffle=False,
             num_workers=config["loader_num_workers"],
             pin_memory=config["device"] == "cuda",
