@@ -176,6 +176,7 @@ class Runner:
             shuffle=True,
             num_workers=config["loader_num_workers"],
             pin_memory=config["device"] == "cuda",
+            multiprocessing_context="fork",
         )
 
         val_dataset_full = datasets.CelebA(
@@ -201,6 +202,7 @@ class Runner:
             shuffle=False,
             num_workers=config["loader_num_workers"],
             pin_memory=config["device"] == "cuda",
+            multiprocessing_context="fork",
         )
 
         return train_loader, val_loader
