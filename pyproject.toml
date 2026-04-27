@@ -11,7 +11,7 @@ name = "learnable-wavelets"
 version = "0.1.0"
 description = "Learnable wavelets for signal and image processing"
 readme = "readme.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
   "torch>=2.10.0",
   "numpy>=2.0.0",
