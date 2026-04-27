@@ -7,6 +7,6 @@ random_seed: 42
 initial_config_path: configs/initial_model.yaml
 initial_temperature: 1.0
 cooling_rate: 0.95
-final_temperature: 1e-2
+final_temperature: 0.01
 batches_per_temperature: 1
 batch_size: 20

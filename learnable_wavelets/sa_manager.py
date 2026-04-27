@@ -15,7 +15,10 @@ class SAManager:
         self.config = config
         self.rng = random.Random(config.get("random_seed", 42))
 
-        initial_config = load_config(config["initial_config_path"])
+        if "initial_config_path" in config:
+            initial_config = load_config(config["initial_config_path"])
+        else:
+            initial_config = config["initial_config"]
 
         self.sa = SimulatedAnnealing(
             initial_config=initial_config,
