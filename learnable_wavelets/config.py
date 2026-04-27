@@ -4,12 +4,12 @@ import yaml
 from pydantic import BaseModel, Field
 
 
-class LeafNode(Enum):
+class LeafNode(str, Enum):
     KEEP = "keep"
     DROP = "drop"
 
 
-class PaddingMode(Enum):
+class PaddingMode(str, Enum):
     REFLECT = "reflect"
     CONSTANT = "constant"
     CIRCULAR = "circular"
