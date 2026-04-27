@@ -37,8 +37,7 @@ class Train:
         self.step = 0
 
         self.device = device
-        self.module = torch.compile(module.to(device), mode="max-autotune")
-        self.module = module.to(device)
+        self.module = torch.compile(module.to(device=device), mode="max-autotune")
         self.no_progress_epochs = 0
         self.last_val_loss = None
         self.last_val_step = 0
@@ -68,7 +67,7 @@ class Train:
 
     def run_epoch(self):
         for batch in self.train_loader:
-            self.train_step(batch.to(self.device))
+            self.train_step(batch.to(device=self.device))
             self.step += 1
             if self.stopped:
                 break
@@ -80,7 +79,7 @@ class Train:
 
         val_iter = iter(self.val_loader)
         batch = next(val_iter)
-        loss = self.validation_step(batch.to(self.device))
+        loss = self.validation_step(batch.to(device=self.device))
 
         try:
             next(val_iter)

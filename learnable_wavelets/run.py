@@ -39,7 +39,7 @@ class Run:
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.module = WaveletModule(config).to(run.config.params_dtype)
+        self.module = WaveletModule(config).to(dtype=run.config.params_dtype)
         self.train = Train(
             train_loader=self.train_loader,
             val_loader=self.val_loader,

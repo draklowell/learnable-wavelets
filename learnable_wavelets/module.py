@@ -82,7 +82,7 @@ class WaveletModule(nn.Module):
 
     def forward(self, x):
         filters = {
-            name: self.params2d(params()).to(x.dtype)
+            name: self.params2d(params()).to(dtype=x.dtype)
             for name, params in self.wavelets.items()
         }
         x_rec = self.model.forward(x, filters)
