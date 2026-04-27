@@ -4,7 +4,7 @@ import tempfile
 from typing import Callable
 
 import wandb
-from learnable_wavelets.config import load_config
+from learnable_wavelets.config import ModuleConfig, load_config
 from learnable_wavelets.simulated_annealing import SimulatedAnnealing
 
 
@@ -18,7 +18,7 @@ class SAManager:
         if "initial_config_path" in config:
             initial_config = load_config(config["initial_config_path"])
         else:
-            initial_config = config["initial_config"]
+            initial_config = ModuleConfig.model_validate(config["initial_config"])
 
         self.sa = SimulatedAnnealing(
             initial_config=initial_config,
