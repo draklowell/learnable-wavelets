@@ -29,6 +29,7 @@ class LeafModule(nn.Module):
             if self.training:
                 return x
             else:
+                # Store coefficients in 8 bits
                 min_ = torch.min(x)
                 max_ = torch.max(x)
                 if min_ == max_:
