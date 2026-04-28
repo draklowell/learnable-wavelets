@@ -1,0 +1,68 @@
+tree:
+  hh:
+    hh: drop
+    hl: drop
+    lh: drop
+    ll:
+      hh:
+        hh:
+          hh: keep
+          hl: drop
+          lh: drop
+          ll: drop
+          padding: reflect
+          wavelet: w1
+        hl: drop
+        lh: drop
+        ll:
+          hh: keep
+          hl:
+            hh: keep
+            hl: drop
+            lh: drop
+            ll: drop
+            padding: reflect
+            wavelet: w1
+          lh:
+            hh: keep
+            hl: drop
+            lh: drop
+            ll: drop
+            padding: reflect
+            wavelet: w1
+          ll: keep
+          padding: reflect
+          wavelet: w1
+        padding: reflect
+        wavelet: w2
+      hl: drop
+      lh: drop
+      ll: keep
+      padding: reflect
+      wavelet: w1
+    padding: reflect
+    wavelet: w1
+  hl:
+    hh: drop
+    hl: drop
+    lh: drop
+    ll: drop
+    padding: reflect
+    wavelet: w1
+  lh:
+    hh: drop
+    hl: drop
+    lh: drop
+    ll: drop
+    padding: reflect
+    wavelet: w1
+  ll: keep
+  padding: reflect
+  wavelet: w0
+wavelets:
+- name: w1
+  support_size: 6
+- name: w2
+  support_size: 6
+- name: w0
+  support_size: 16
