@@ -26,7 +26,15 @@ class LeafModule(nn.Module):
 
     def forward(self, x, _: dict[str, WaveletTransformParameters2D]):
         if self.type == LeafNode.KEEP:
-            return x
+            if self.training:
+                return x
+            else:
+                min_ = torch.min(x)
+                max_ = torch.max(x)
+                if min_ == max_:
+                    return x
+                y = torch.round((x - min_) / (max_ - min_) * 255)
+                return y / 255 * (max_ - min_) + min_
         elif self.type == LeafNode.DROP:
             return x * 0
         else:
