@@ -4,6 +4,8 @@ import json
 import os
 import random
 import re
+import shutil
+import subprocess
 import threading
 import zipfile
 from bisect import bisect_right
@@ -489,6 +491,87 @@ def _open_archive_group_zip(parts: tuple[Path, ...]):
         stream.close()
 
 
+def _join_split_archive(parts: tuple[Path, ...], work_dir: Path) -> Path:
+    zip_part = next((part for part in parts if _is_zip_file(part)), None)
+    if zip_part is None:
+        raise RuntimeError("Split archive group is missing the final .zip file")
+
+    zip_bin = shutil.which("zip")
+    if zip_bin is None:
+        raise RuntimeError(
+            "Python could not read this split zip directly and the `zip` command "
+            "is not available for fallback conversion. On Colab run: "
+            "!apt-get update && !apt-get install -y zip"
+        )
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    joined_path = work_dir / f"{zip_part.with_suffix('').name}.joined.zip"
+    joined_path.unlink(missing_ok=True)
+
+    result = subprocess.run(
+        [zip_bin, "-q", "-s", "0", zip_part.name, "--out", str(joined_path)],
+        cwd=zip_part.parent,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to convert split zip group into a temporary single zip with "
+            f"`zip -s 0`: {zip_part}\n{result.stderr.strip()}"
+        )
+    return joined_path
+
+
+@contextmanager
+def _open_archive_group_zip_with_fallback(parts: tuple[Path, ...], work_dir: Path):
+    joined_path: Path | None = None
+    try:
+        try:
+            with _open_archive_group_zip(parts) as zf:
+                yield zf
+                return
+        except BadZipFile:
+            if len(parts) == 1:
+                raise
+
+        joined_path = _join_split_archive(parts, work_dir)
+        with ZipFile(joined_path, "r") as zf:
+            yield zf
+    finally:
+        if joined_path is not None:
+            joined_path.unlink(missing_ok=True)
+
+
+def _extract_archive_group_with_7z(parts: tuple[Path, ...], work_dir: Path) -> Path:
+    zip_part = next((part for part in parts if _is_zip_file(part)), None)
+    if zip_part is None:
+        raise RuntimeError("Split archive group is missing the final .zip file")
+
+    seven_zip = shutil.which("7z") or shutil.which("7za")
+    if seven_zip is None:
+        raise RuntimeError(
+            "Python could not read this split zip directly, and 7z is not available "
+            "for fallback extraction. On Colab run: "
+            "!apt-get update && apt-get install -y p7zip-full"
+        )
+
+    extract_dir = work_dir / f"{zip_part.with_suffix('').name}.extract"
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    result = subprocess.run(
+        [seven_zip, "x", "-y", str(zip_part), f"-o{extract_dir}"],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"7z failed to extract split zip group: {zip_part}\n"
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return extract_dir
+
+
 @dataclass(frozen=True)
 class ArchiveGroup:
     key: str
@@ -895,6 +978,7 @@ def build_liu4k_patches_from_archives(
     output_root = Path(output_root)
     train_dir = output_root / "train"
     validation_dir = output_root / "validation"
+    joined_work_dir = archive_root / ".liu4k-joined-zips"
     required_count = train_count + validation_count
 
     archive_groups = _collect_archive_groups(archive_root)
@@ -914,58 +998,90 @@ def build_liu4k_patches_from_archives(
     written_patches = 0
     processed_images = 0
 
+    def write_image_patches(image: Image.Image) -> None:
+        nonlocal written_patches
+
+        boxes = list(
+            _iter_patch_boxes(
+                image.width,
+                image.height,
+                patch_size,
+            )
+        )
+        rng.shuffle(boxes)
+
+        for x, y in boxes:
+            if written_patches >= required_count:
+                break
+
+            split = target_splits[written_patches]
+            split_dir = train_dir if split == "train" else validation_dir
+            output_path = split_dir / _patch_file_name(
+                split_indices[split],
+                storage_format,
+            )
+            _save_patch(
+                image=image,
+                output_path=output_path,
+                x=x,
+                y=y,
+                patch_size=patch_size,
+                storage_format=storage_format,
+                png_compress_level=png_compress_level,
+            )
+            split_indices[split] += 1
+            written_patches += 1
+
+    def write_from_zipfile(zf: ZipFile) -> None:
+        nonlocal processed_images
+
+        image_infos = [
+            info
+            for info in zf.infolist()
+            if not info.is_dir() and _is_image_file(Path(info.filename))
+        ]
+        rng.shuffle(image_infos)
+
+        for info in image_infos:
+            with zf.open(info, "r") as file:
+                data = file.read()
+
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                processed_images += 1
+                write_image_patches(image)
+
+            if written_patches >= required_count:
+                break
+
+    def write_from_extracted_dir(extract_dir: Path) -> None:
+        nonlocal processed_images
+
+        image_paths = _collect_image_files(extract_dir)
+        rng.shuffle(image_paths)
+
+        for image_path in image_paths:
+            with Image.open(image_path) as image:
+                image.load()
+                processed_images += 1
+                write_image_patches(image)
+
+            if written_patches >= required_count:
+                break
+
     for group in selected_groups:
         try:
-            with _open_archive_group_zip(group.parts) as zf:
-                image_infos = [
-                    info
-                    for info in zf.infolist()
-                    if not info.is_dir() and _is_image_file(Path(info.filename))
-                ]
-                rng.shuffle(image_infos)
-
-                for info in image_infos:
-                    with zf.open(info, "r") as file:
-                        data = file.read()
-
-                    with Image.open(io.BytesIO(data)) as image:
-                        image.load()
-                        processed_images += 1
-                        boxes = list(
-                            _iter_patch_boxes(
-                                image.width,
-                                image.height,
-                                patch_size,
-                            )
-                        )
-                        rng.shuffle(boxes)
-
-                        for x, y in boxes:
-                            if written_patches >= required_count:
-                                break
-
-                            split = target_splits[written_patches]
-                            split_dir = (
-                                train_dir if split == "train" else validation_dir
-                            )
-                            output_path = split_dir / _patch_file_name(
-                                split_indices[split],
-                                storage_format,
-                            )
-                            _save_patch(
-                                image=image,
-                                output_path=output_path,
-                                x=x,
-                                y=y,
-                                patch_size=patch_size,
-                                storage_format=storage_format,
-                                png_compress_level=png_compress_level,
-                            )
-                            split_indices[split] += 1
-                            written_patches += 1
-
-                    if written_patches >= required_count:
-                        break
+            try:
+                with _open_archive_group_zip(group.parts) as zf:
+                    write_from_zipfile(zf)
+            except BadZipFile:
+                extract_dir = _extract_archive_group_with_7z(
+                    group.parts, joined_work_dir
+                )
+                try:
+                    write_from_extracted_dir(extract_dir)
+                finally:
+                    shutil.rmtree(extract_dir, ignore_errors=True)
         finally:
             if cleanup_archives:
                 for part in group.parts:
@@ -980,6 +1096,12 @@ def build_liu4k_patches_from_archives(
             f"{written_patches} patches, but {required_count} are required. "
             "Increase --download-fraction/--source-fraction or reduce split sizes."
         )
+
+    if joined_work_dir.exists():
+        try:
+            joined_work_dir.rmdir()
+        except OSError:
+            pass
 
     manifest = LIU4KBuildManifest(
         raw_root=str(archive_root.resolve()),
