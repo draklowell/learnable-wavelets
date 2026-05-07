@@ -1,6 +1,5 @@
 import hashlib
 import importlib.util
-import io
 import tarfile
 import time
 import zipfile
@@ -157,6 +156,7 @@ def _default_dataset_root(name: str) -> Path:
 @dataclass
 class _DatasetSource:
     name: str
+    pre_split: bool = False
 
     def __len__(self) -> int:
         raise NotImplementedError
@@ -194,62 +194,26 @@ class _LIU4KImageSource(_DatasetSource):
         name: str,
         root: Path,
         split: str,
-        auto_download_if_empty: bool,
     ) -> None:
         self.name = name
+        self.pre_split = True
         liu4k_dataset_class = _load_liu4k_dataset_class()
         self._dataset = liu4k_dataset_class(
             root=root,
             split=split,
-            auto_download_if_empty=auto_download_if_empty,
-            return_class=False,
-            max_nested_zip_depth=0,
         )
-        self._samples = self._dataset.samples
 
     def __len__(self) -> int:
-        return len(self._samples)
+        return len(self._dataset)
 
     def key_at(self, index: int) -> str:
-        source_type, source_ref, _ = self._samples[index]
-        return f"{source_type}:{source_ref}"
+        return str(self._dataset.paths[index].resolve())
 
     def pil_image_at(self, index: int) -> Image.Image:
-        source_type, source_ref, _ = self._samples[index]
-        if source_type == "file":
-            with Image.open(source_ref) as img:
-                return img.convert("RGB")
-
-        zip_path_str, chain_str = source_ref.split("::", 1)
-        zip_path = Path(zip_path_str)
-        zf = self._dataset._get_zip(zip_path)
-
-        current_zip = zf
-        nested_zip_handles: list[zipfile.ZipFile] = []
-        raw = None
-        try:
-            for i, member_name in enumerate(chain_str.split("||")):
-                is_last = i == len(chain_str.split("||")) - 1
-                with current_zip.open(member_name, "r") as f:
-                    data = f.read()
-                if is_last:
-                    raw = data
-                    break
-                nested_zip = zipfile.ZipFile(io.BytesIO(data), "r")
-                nested_zip_handles.append(nested_zip)
-                current_zip = nested_zip
-        finally:
-            for handle in nested_zip_handles:
-                handle.close()
-
-        if raw is None:
-            raise RuntimeError(f"Failed to read LIU4K sample at index {index}")
-
-        with Image.open(io.BytesIO(raw)) as img:
-            return img.convert("RGB")
+        return self._dataset.pil_image_at(index).convert("RGB")
 
     def close(self) -> None:
-        self._dataset.close()
+        return None
 
 
 class MixedImageVisionDataset(VisionDataset):
@@ -263,8 +227,6 @@ class MixedImageVisionDataset(VisionDataset):
         target_transform=None,
         liu4k_root: str | Path | None = None,
         include_liu4k: bool = True,
-        liu4k_download_split: str = "train",
-        liu4k_auto_download_if_empty: bool = True,
         coco_root: str | Path | None = None,
         include_coco: bool = False,
         div2k_root: str | Path | None = None,
@@ -297,16 +259,18 @@ class MixedImageVisionDataset(VisionDataset):
 
         if include_liu4k:
             resolved_liu4k_root = (
-                Path(liu4k_root)
-                if liu4k_root is not None
-                else Path("liu4k") / liu4k_download_split
+                Path(liu4k_root) if liu4k_root is not None else Path("liu4k")
+            )
+            resolved_liu4k_split = (
+                "validation"
+                if self.split == "valid"
+                else "train" if self.split == "train" else "all"
             )
             self._sources.append(
                 _LIU4KImageSource(
                     name="liu4k",
                     root=resolved_liu4k_root,
-                    split=liu4k_download_split,
-                    auto_download_if_empty=liu4k_auto_download_if_empty,
+                    split=resolved_liu4k_split,
                 )
             )
 
@@ -355,7 +319,7 @@ class MixedImageVisionDataset(VisionDataset):
                 key = f"{source.name}::{source.key_at(index)}"
                 is_train = _stable_train_membership(key, split_seed, train_ratio)
 
-                if self.split == "all":
+                if self.split == "all" or source.pre_split:
                     self._samples.append((source.name, source, index))
                 elif self.split == "train" and is_train:
                     self._samples.append((source.name, source, index))
@@ -401,8 +365,6 @@ def build_mixed_vision_dataloader(
     normalize_std: float | None = 0.5,
     liu4k_root: str | Path | None = None,
     include_liu4k: bool = True,
-    liu4k_download_split: str = "train",
-    liu4k_auto_download_if_empty: bool = True,
     coco_root: str | Path | None = None,
     include_coco: bool = False,
     div2k_root: str | Path | None = None,
@@ -430,8 +392,6 @@ def build_mixed_vision_dataloader(
         transform=transform,
         liu4k_root=liu4k_root,
         include_liu4k=include_liu4k,
-        liu4k_download_split=liu4k_download_split,
-        liu4k_auto_download_if_empty=liu4k_auto_download_if_empty,
         coco_root=coco_root,
         include_coco=include_coco,
         div2k_root=div2k_root,
