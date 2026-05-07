@@ -2,11 +2,11 @@ import tempfile
 from copy import deepcopy
 
 import torch
-import wandb
 from torch.utils import data
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 
+import wandb
 from learnable_wavelets import psnr_metric
 from learnable_wavelets import wandb as lw_wandb
 from learnable_wavelets.config import ModuleConfig

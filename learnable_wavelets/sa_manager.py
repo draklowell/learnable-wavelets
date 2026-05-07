@@ -4,7 +4,6 @@ import tempfile
 from typing import Callable
 
 import wandb
-
 from learnable_wavelets.config import ModuleConfig, load_config
 from learnable_wavelets.simulated_annealing import SimulatedAnnealing
 

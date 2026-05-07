@@ -1,3 +1,5 @@
+from typing import Callable
+
 import torch
 from torch import nn
 
@@ -10,7 +12,7 @@ from learnable_wavelets.model import (
 )
 
 
-def build_module(config: LeafNode | SplitNode):
+def build_module(config: LeafNode | SplitNode) -> nn.Module:
     if isinstance(config, LeafNode):
         return LeafModule(config)
     elif isinstance(config, SplitNode):
@@ -24,7 +26,12 @@ class LeafModule(nn.Module):
         super().__init__()
         self.type = type_
 
-    def forward(self, x, _: dict[str, WaveletTransformParameters2D]):
+    def forward(
+        self,
+        x,
+        _: dict[str, WaveletTransformParameters2D],
+        middleware: Callable[[torch.Tensor], torch.Tensor] = lambda x: x,
+    ):
         if self.type == LeafNode.KEEP:
             if self.training:
                 return x
@@ -35,6 +42,7 @@ class LeafModule(nn.Module):
                 if min_ == max_:
                     return x
                 y = torch.round((x - min_) / (max_ - min_) * 255)
+                y = middleware(y)
                 return y / 255 * (max_ - min_) + min_
         elif self.type == LeafNode.DROP:
             return x * 0
@@ -54,16 +62,21 @@ class SplitModule(nn.Module):
         self.lh = build_module(config.lh)
         self.ll = build_module(config.ll)
 
-    def forward(self, x, filters: dict[str, WaveletTransformParameters2D]):
+    def forward(
+        self,
+        x,
+        filters: dict[str, WaveletTransformParameters2D],
+        middleware: Callable[[torch.Tensor], torch.Tensor] = lambda x: x,
+    ):
         ll, details = self.analysis(x, filters[self.wavelet])
         lh = details[:, 0:1, :, :]
         hl = details[:, 1:2, :, :]
         hh = details[:, 2:3, :, :]
 
-        ll = self.ll.forward(ll, filters)
-        lh = self.lh.forward(lh, filters)
-        hl = self.hl.forward(hl, filters)
-        hh = self.hh.forward(hh, filters)
+        ll = self.ll.forward(ll, filters, middleware=middleware)
+        lh = self.lh.forward(lh, filters, middleware=middleware)
+        hl = self.hl.forward(hl, filters, middleware=middleware)
+        hh = self.hh.forward(hh, filters, middleware=middleware)
 
         min_width = min(ll.shape[-1], lh.shape[-1], hl.shape[-1], hh.shape[-1])
         min_height = min(ll.shape[-2], lh.shape[-2], hl.shape[-2], hh.shape[-2])
@@ -89,10 +102,12 @@ class WaveletModule(nn.Module):
         )
         self.params2d = WaveletTransformParameters2D()
 
-    def forward(self, x):
+    def forward(
+        self, x, middleware: Callable[[torch.Tensor], torch.Tensor] = lambda x: x
+    ):
         filters = {
             name: self.params2d(params()).to(dtype=x.dtype)
             for name, params in self.wavelets.items()
         }
-        x_rec = self.model.forward(x, filters)
+        x_rec = self.model.forward(x, filters, middleware=middleware)
         return x_rec[:, :, : x.shape[-2], : x.shape[-1]]
