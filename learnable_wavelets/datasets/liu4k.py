@@ -19,6 +19,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+PATCH_EXTENSIONS = {".pt", ".npy", ".png"}
 SPLIT_ZIP_PART_PATTERN = re.compile(r"\.z(\d+)$", re.IGNORECASE)
 _ZIPFILE_PATCH_LOCK = threading.Lock()
 DEFAULT_PATCH_SIZE = 200
@@ -26,6 +27,7 @@ DEFAULT_SOURCE_FRACTION = 1.0 / 3.0
 DEFAULT_TRAIN_COUNT = 160_000
 DEFAULT_VALIDATION_COUNT = 20_000
 DEFAULT_SEED = 42
+DEFAULT_STORAGE_FORMAT = "pt"
 
 
 def _is_image_file(path: Path) -> bool:
@@ -42,6 +44,30 @@ def _is_zip_file(path: Path) -> bool:
 
 def _is_archive_file(path: Path) -> bool:
     return _is_zip_file(path) or _is_split_zip_part(path)
+
+
+def _is_patch_file(path: Path) -> bool:
+    return path.suffix.lower() in PATCH_EXTENSIONS
+
+
+def _normalize_storage_format(storage_format: str) -> str:
+    normalized = storage_format.strip().lower()
+    if normalized not in {"pt", "npy", "png"}:
+        raise ValueError("storage_format must be one of: pt, npy, png")
+    return normalized
+
+
+def _storage_compression(storage_format: str) -> str:
+    storage_format = _normalize_storage_format(storage_format)
+    if storage_format == "pt":
+        return "none (torch.save legacy tensor)"
+    if storage_format == "npy":
+        return "none (uncompressed NumPy .npy)"
+    return "PNG lossless DEFLATE"
+
+
+def _patch_file_name(index: int, storage_format: str) -> str:
+    return f"{index:06d}.{_normalize_storage_format(storage_format)}"
 
 
 def _archive_group_key(path: Path) -> str:
@@ -147,20 +173,37 @@ def _prepare_output_split(split_dir: Path, *, overwrite: bool) -> None:
 
     split_dir.mkdir(parents=True, exist_ok=True)
     if overwrite:
-        for path in split_dir.glob("*.png"):
-            path.unlink()
+        for path in split_dir.iterdir():
+            if path.is_file() and _is_patch_file(path):
+                path.unlink()
 
 
-def _save_png_patch(
+def _save_patch(
     *,
     image: Image.Image,
     output_path: Path,
     x: int,
     y: int,
     patch_size: int,
+    storage_format: str,
     png_compress_level: int,
 ) -> None:
     patch = image.crop((x, y, x + patch_size, y + patch_size))
+    storage_format = _normalize_storage_format(storage_format)
+    array = np.asarray(patch)
+
+    if storage_format == "pt":
+        if array.ndim == 2:
+            tensor = torch.from_numpy(array.copy()).unsqueeze(0)
+        else:
+            tensor = torch.from_numpy(array.copy()).permute(2, 0, 1).contiguous()
+        torch.save(tensor, output_path, _use_new_zipfile_serialization=False)
+        return
+
+    if storage_format == "npy":
+        np.save(output_path, array, allow_pickle=False)
+        return
+
     patch.save(
         output_path,
         format="PNG",
@@ -173,8 +216,10 @@ def _write_split(
     *,
     split_dir: Path,
     patch_size: int,
+    storage_format: str,
     png_compress_level: int,
 ) -> None:
+    storage_format = _normalize_storage_format(storage_format)
     current_image_path: Path | None = None
     current_image: Image.Image | None = None
     ordered_refs = sorted(
@@ -191,13 +236,14 @@ def _write_split(
                 current_image.load()
                 current_image_path = image_path
 
-            output_path = split_dir / f"{index:06d}.png"
-            _save_png_patch(
+            output_path = split_dir / _patch_file_name(index, storage_format)
+            _save_patch(
                 image=current_image,
                 output_path=output_path,
                 x=x,
                 y=y,
                 patch_size=patch_size,
+                storage_format=storage_format,
                 png_compress_level=png_compress_level,
             )
     finally:
@@ -462,7 +508,8 @@ class LIU4KBuildManifest:
     validation_count: int
     source_kind: str = "images"
     selected_archive_groups: int = 0
-    compression: str = "PNG lossless"
+    storage_format: str = DEFAULT_STORAGE_FORMAT
+    compression: str = "none (torch.save legacy tensor)"
 
 
 @dataclass(frozen=True)
@@ -749,18 +796,19 @@ def build_liu4k_patches(
     train_count: int = DEFAULT_TRAIN_COUNT,
     validation_count: int = DEFAULT_VALIDATION_COUNT,
     seed: int = DEFAULT_SEED,
+    storage_format: str = DEFAULT_STORAGE_FORMAT,
     png_compress_level: int = 9,
     overwrite: bool = False,
 ) -> LIU4KBuildManifest:
-    """Build a losslessly compressed LIU4K patch dataset.
+    """Build a LIU4K patch dataset without lossy compression.
 
     The builder samples source images uniformly without replacement, cuts only
     non-overlapping full patches, shuffles those patch references, and writes
-    train/validation PNG files. PNG compression is lossless, so this pipeline
-    does not add lossy compression beyond whatever format the raw data already
-    used.
+    train/validation patch files. The default .pt storage is an uncompressed
+    torch.uint8 tensor in [C, H, W] layout.
     """
 
+    storage_format = _normalize_storage_format(storage_format)
     if not (0 <= png_compress_level <= 9):
         raise ValueError("png_compress_level must be between 0 and 9")
 
@@ -790,12 +838,14 @@ def build_liu4k_patches(
         train_refs,
         split_dir=train_dir,
         patch_size=patch_size,
+        storage_format=storage_format,
         png_compress_level=png_compress_level,
     )
     _write_split(
         validation_refs,
         split_dir=validation_dir,
         patch_size=patch_size,
+        storage_format=storage_format,
         png_compress_level=png_compress_level,
     )
 
@@ -809,6 +859,8 @@ def build_liu4k_patches(
         available_patches=len(patch_refs),
         train_count=len(train_refs),
         validation_count=len(validation_refs),
+        storage_format=storage_format,
+        compression=_storage_compression(storage_format),
     )
 
     output_root.mkdir(parents=True, exist_ok=True)
@@ -828,12 +880,14 @@ def build_liu4k_patches_from_archives(
     train_count: int = DEFAULT_TRAIN_COUNT,
     validation_count: int = DEFAULT_VALIDATION_COUNT,
     seed: int = DEFAULT_SEED,
+    storage_format: str = DEFAULT_STORAGE_FORMAT,
     png_compress_level: int = 9,
     overwrite: bool = False,
     cleanup_archives: bool = False,
 ) -> LIU4KBuildManifest:
     """Build patches from local zip files or complete split-zip groups."""
 
+    storage_format = _normalize_storage_format(storage_format)
     if not (0 <= png_compress_level <= 9):
         raise ValueError("png_compress_level must be between 0 and 9")
 
@@ -894,13 +948,17 @@ def build_liu4k_patches_from_archives(
                             split_dir = (
                                 train_dir if split == "train" else validation_dir
                             )
-                            output_path = split_dir / f"{split_indices[split]:06d}.png"
-                            _save_png_patch(
+                            output_path = split_dir / _patch_file_name(
+                                split_indices[split],
+                                storage_format,
+                            )
+                            _save_patch(
                                 image=image,
                                 output_path=output_path,
                                 x=x,
                                 y=y,
                                 patch_size=patch_size,
+                                storage_format=storage_format,
                                 png_compress_level=png_compress_level,
                             )
                             split_indices[split] += 1
@@ -935,6 +993,8 @@ def build_liu4k_patches_from_archives(
         validation_count=split_indices["validation"],
         source_kind="archive-groups",
         selected_archive_groups=len(selected_groups),
+        storage_format=storage_format,
+        compression=_storage_compression(storage_format),
     )
 
     output_root.mkdir(parents=True, exist_ok=True)
@@ -945,9 +1005,7 @@ def build_liu4k_patches_from_archives(
     return manifest
 
 
-def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
-    array = np.asarray(image)
-
+def _array_to_tensor(array: np.ndarray) -> torch.Tensor:
     if array.ndim == 2:
         array = array[:, :, None]
 
@@ -957,6 +1015,50 @@ def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
 
     tensor = torch.from_numpy(array.copy()).permute(2, 0, 1)
     return tensor.to(torch.float32)
+
+
+def _pil_to_tensor(image: Image.Image) -> torch.Tensor:
+    return _array_to_tensor(np.asarray(image))
+
+
+def _load_pt_patch(path: Path) -> torch.Tensor:
+    try:
+        patch = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        patch = torch.load(path, map_location="cpu")
+
+    if not isinstance(patch, torch.Tensor):
+        raise TypeError(f"Expected tensor in patch file: {path}")
+    return patch
+
+
+def _patch_tensor_to_float(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 2:
+        tensor = tensor.unsqueeze(0)
+    if tensor.dtype == torch.uint8:
+        return tensor.float() / 255.0
+    return tensor.to(torch.float32)
+
+
+def _array_to_pil(array: np.ndarray) -> Image.Image:
+    if array.ndim == 3 and array.shape[2] == 1:
+        array = array[:, :, 0]
+    return Image.fromarray(array)
+
+
+def _patch_tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
+    if tensor.ndim == 2:
+        array = tensor.cpu().numpy()
+    elif tensor.ndim == 3:
+        if tensor.shape[0] == 1:
+            array = tensor[0].cpu().numpy()
+        else:
+            array = tensor.permute(1, 2, 0).cpu().numpy()
+    else:
+        raise ValueError(
+            f"Expected 2D or 3D patch tensor, got shape {tuple(tensor.shape)}"
+        )
+    return Image.fromarray(array)
 
 
 def _normalize_split(split: str) -> str:
@@ -976,7 +1078,7 @@ def _normalize_split(split: str) -> str:
 
 
 class LIU4KDataset(Dataset):
-    """PyTorch dataset for prepared lossless LIU4K 200x200 PNG patches."""
+    """PyTorch dataset for prepared LIU4K 200x200 patch tensors."""
 
     def __init__(
         self,
@@ -1008,13 +1110,14 @@ class LIU4KDataset(Dataset):
         self.paths = sorted(
             path
             for split_root in self.split_roots
-            for path in split_root.rglob("*.png")
+            for path in split_root.rglob("*")
+            if path.is_file() and _is_patch_file(path)
         )
         self.samples = self.paths
 
         if not self.paths:
             raise RuntimeError(
-                f"No prepared LIU4K PNG patches found in {self.root}. "
+                f"No prepared LIU4K patch files found in {self.root}. "
                 "Run build_liu4k_patches(...) first."
             )
 
@@ -1022,16 +1125,25 @@ class LIU4KDataset(Dataset):
         return len(self.paths)
 
     def pil_image_at(self, index: int) -> Image.Image:
-        with Image.open(self.paths[index]) as image:
+        path = self.paths[index]
+        if path.suffix.lower() == ".pt":
+            return _patch_tensor_to_pil(_load_pt_patch(path))
+        if path.suffix.lower() == ".npy":
+            return _array_to_pil(np.load(path, allow_pickle=False))
+        with Image.open(path) as image:
             return image.copy()
 
     def __getitem__(self, index: int):
         path = self.paths[index]
-        image = self.pil_image_at(index)
-
         if self.transform is not None:
+            image = self.pil_image_at(index)
             sample = self.transform(image)
+        elif path.suffix.lower() == ".pt":
+            sample = _patch_tensor_to_float(_load_pt_patch(path))
+        elif path.suffix.lower() == ".npy":
+            sample = _array_to_tensor(np.load(path, allow_pickle=False))
         else:
+            image = self.pil_image_at(index)
             sample = _pil_to_tensor(image)
 
         if self.return_path:
@@ -1042,7 +1154,7 @@ class LIU4KDataset(Dataset):
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare LIU4K as lossless 200x200 PNG patches from a local or "
+            "Prepare LIU4K as 200x200 .pt patch tensors from a local or "
             "mounted source folder, or from a selective Google Drive download."
         )
     )
@@ -1078,7 +1190,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-root",
         required=True,
-        help="Destination folder for train/validation PNG patches.",
+        help="Destination folder for train/validation patch files.",
     )
     parser.add_argument(
         "--download-root",
@@ -1115,6 +1227,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_VALIDATION_COUNT,
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--storage-format",
+        choices=("pt", "npy", "png"),
+        default=DEFAULT_STORAGE_FORMAT,
+        help="Patch storage format. Default .pt stores torch.uint8 tensors.",
+    )
     parser.add_argument("--png-compress-level", type=int, default=9)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -1169,6 +1287,7 @@ def main() -> None:
             train_count=args.train_count,
             validation_count=args.validation_count,
             seed=args.seed,
+            storage_format=args.storage_format,
             png_compress_level=args.png_compress_level,
             overwrite=args.overwrite,
             cleanup_archives=args.cleanup_archives_after_build,
@@ -1182,6 +1301,7 @@ def main() -> None:
             train_count=args.train_count,
             validation_count=args.validation_count,
             seed=args.seed,
+            storage_format=args.storage_format,
             png_compress_level=args.png_compress_level,
             overwrite=args.overwrite,
         )
